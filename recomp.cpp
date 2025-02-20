@@ -250,6 +250,7 @@ map<uint32_t, string> symbol_names;
 vector<pair<uint32_t, uint32_t>> data_function_pointers;
 set<uint32_t> la_function_pointers;
 map<uint32_t, Function> functions;
+map<uint32_t, uint32_t> jtbl_sizes;
 uint32_t main_addr;
 uint32_t mcount_addr;
 uint32_t procedure_table_start;
@@ -732,6 +733,20 @@ void pass1(void) {
                 // something
                 // addu    t3,t3,gp
                 // jr      t3
+
+                // IDO 7.1 N32:
+                // switch ($t1)
+                // sltiu       $v1, $t1, 0xA
+                // sll         $t1, $t1, 2
+                // lui         $at, %hi(jtbl_1008D090)
+                // addiu       $at, $at, %lo(jtbl_1008D090)
+                // something
+                // addu        $t1, $t1, $at
+                // beqz        $v1, .L10008F98
+                //  something
+                // lw          $at, 0x0($t1)
+                // jr          $at
+
                 if (i >= 7 && rodata_section != NULL) {
                     bool is_pic =
                         (insns[i - 1].instruction.getUniqueId() == rabbitizer::InstrId::UniqueId::cpu_addu) &&
@@ -746,121 +761,172 @@ void pass1(void) {
                         --lw;
                     }
 
-                    if ((insns[lw].instruction.getUniqueId() == rabbitizer::InstrId::UniqueId::cpu_lw) &&
-                        (insns[lw].linked_insn != -1)) {
+                    if (insns[lw].instruction.getUniqueId() == rabbitizer::InstrId::UniqueId::cpu_lw) {
+                        uint32_t jtbl_addr = 0;
                         int sltiu_index = -1;
                         int andi_index = -1;
-                        uint32_t addu_index = lw - 1;
+                        int sll_index = -1;
+                        int addu_index = -1;
                         uint32_t num_cases;
                         bool found = false;
-                        bool and_variant = false;
                         int end = 14;
 
-                        if (insns[addu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addu) {
-                            --addu_index;
-                        }
+                        if (n32) {
+                            int addiu_index;
 
-                        if (insns[addu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addu) {
-                            goto skip;
-                        }
-
-                        if (insns[addu_index - 1].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_sll) {
-                            goto skip;
-                        }
-
-                        if (get_dest_reg(insns[addu_index - 1]) != insn.instruction.GetO32_rs()) {
-                            goto skip;
-                        }
-
-                        for (int j = 3; j <= 4; j++) {
-                            if (insns[lw - j].instruction.getUniqueId() == rabbitizer::InstrId::UniqueId::cpu_andi) {
-                                andi_index = lw - j;
-                                break;
-                            }
-                        }
-
-                        if (i == 368393) {
-                            // In copt
-                            end = 18;
-                        }
-
-                        for (int j = 5; j <= end; j++) {
-                            if ((insns[lw - has_extra - j].instruction.getUniqueId() ==
-                                 rabbitizer::InstrId::UniqueId::cpu_sltiu) &&
-                                (insns[lw - has_extra - j].instruction.GetO32_rt() ==
-                                 rabbitizer::Registers::Cpu::GprO32::GPR_O32_at)) {
-                                sltiu_index = j;
-                                break;
+                            if (insn.instruction.GetO32_rs() == rabbitizer::Registers::Cpu::GprO32::GPR_O32_ra) {
+                                goto skip; // TODO: can jumptables use $ra?
                             }
 
-                            if (insns[lw - has_extra - j].instruction.getUniqueId() ==
-                                rabbitizer::InstrId::UniqueId::cpu_jr) {
-                                // Prevent going into a previous switch
-                                break;
+                            // TODO: make this more robust
+
+                            // TODO: for 0x1003D4F0 in ld, the addu result gets stored on the stack temporarily.
+                            // Need a better filter
+                            addu_index = lw - 1;
+                            while (insns[addu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addu ||
+                                   (i != 53987 && insns[addu_index].instruction.GetO32_rd() != insns[lw].instruction.GetO32_rs())) {
+                                --addu_index;
                             }
-                        }
 
-                        if (sltiu_index != -1) {
-                            andi_index = -1;
-                        }
+                            sll_index = addu_index - 1;
+                            while (insns[sll_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_sll) {
+                                --sll_index;
+                            }
 
-                        if (sltiu_index != -1 && insns[lw - has_extra - sltiu_index].instruction.getUniqueId() ==
-                                                     rabbitizer::InstrId::UniqueId::cpu_sltiu) {
-                            num_cases = insns[lw - has_extra - sltiu_index].instruction.getProcessedImmediate();
+                            addiu_index = addu_index - 1;
+                            while (insns[addiu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addiu ||
+                                   insns[addiu_index - 1].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_lui) {
+                                --addiu_index;
+                            }
+
+                            jtbl_addr = (insns[addiu_index - 1].instruction.getProcessedImmediate() << 16) +
+                                         insns[addiu_index].instruction.getProcessedImmediate();
+
+
+                            sltiu_index = lw - 1;
+                            while (insns[sltiu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_sltiu) {
+                                --sltiu_index;
+                            }
+
+                            num_cases = insns[sltiu_index].instruction.getProcessedImmediate();
                             found = true;
-                        } else if (andi_index != -1) {
-                            num_cases = insns[andi_index].instruction.getProcessedImmediate() + 1;
-                            found = true;
-                            and_variant = true;
-                        } else if (i == 219382) {
-                            // Special hard case in copt where the initial sltiu is in another basic block
-                            found = true;
-                            num_cases = 13;
-                        } else if (i == 370995) {
-                            // Special hard case in copt where the initial sltiu is in another basic block
-                            found = true;
-                            num_cases = 12;
-                        } else if (i == 37743) {
-                            // Special hard case in edgcpfe where the initial sltiu is in another basic block
-                            if ((lw == 37740) && (addu_index == 37739)) {
-                                // few extra checks to try to ensure we are in edgcpfe
-                                if ((insns[lw].instruction.getRaw() == 0x8C3970A4) &&
-                                    (insns[addu_index].instruction.getRaw() == 0x00390821)) {
-                                    found = true;
-                                    num_cases = 6;
+
+                            // fprintf(stderr, "n32 i=%d addr=%08x jtbl_addr=%08x num_cases=0x%x lw=%d addu_index=%d sll_index=%d addiu_index=%d\n", i, insn.instruction.getVram(), jtbl_addr, num_cases,
+                            //     lw - i, addu_index - i, sll_index - i, addiu_index - i);
+                        } else {
+                            if (insns[lw].linked_insn == -1) {
+                                goto skip;
+                            }
+
+                            jtbl_addr = insns[lw].linked_value;
+
+                            // TODO: much of this could be merged with the n32 case
+                            addu_index = lw - 1;
+                            if (insns[addu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addu) {
+                                --addu_index;
+                            }
+
+                            if (insns[addu_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_addu) {
+                                goto skip;
+                            }
+
+                            sll_index = addu_index - 1;
+                            if (insns[sll_index].instruction.getUniqueId() != rabbitizer::InstrId::UniqueId::cpu_sll) {
+                                goto skip;
+                            }
+
+                            if (get_dest_reg(insns[sll_index]) != insn.instruction.GetO32_rs()) {
+                                goto skip;
+                            }
+
+                            for (int j = 3; j <= 4; j++) {
+                                if (insns[lw - j].instruction.getUniqueId() == rabbitizer::InstrId::UniqueId::cpu_andi) {
+                                    andi_index = lw - j;
+                                    break;
                                 }
                             }
-                        } else if (i == 208684) {
-                            // Special hard case in edgcpfe where the initial sltiu is in another basic block
-                            if ((lw == 208681) && (addu_index == 208680)) {
-                                // few extra checks to try to ensure we are in edgcpfe
-                                if ((insns[lw].instruction.getRaw() == 0x8C2B227C) &&
-                                    (insns[addu_index].instruction.getRaw() == 0x002B0821)) {
-                                    found = true;
-                                    num_cases = 8;
+
+                            if (i == 368393) {
+                                // In copt
+                                end = 18;
+                            }
+
+                            for (int j = 5; j <= end; j++) {
+                                if ((insns[lw - has_extra - j].instruction.getUniqueId() ==
+                                     rabbitizer::InstrId::UniqueId::cpu_sltiu) &&
+                                    (insns[lw - has_extra - j].instruction.GetO32_rt() ==
+                                     rabbitizer::Registers::Cpu::GprO32::GPR_O32_at)) {
+                                    sltiu_index = j;
+                                    break;
+                                }
+
+                                if (insns[lw - has_extra - j].instruction.getUniqueId() ==
+                                    rabbitizer::InstrId::UniqueId::cpu_jr) {
+                                    // Prevent going into a previous switch
+                                    break;
+                                }
+                            }
+
+                            if (sltiu_index != -1) {
+                                andi_index = -1;
+                            }
+
+                            if (sltiu_index != -1 && insns[lw - has_extra - sltiu_index].instruction.getUniqueId() ==
+                                                         rabbitizer::InstrId::UniqueId::cpu_sltiu) {
+                                num_cases = insns[lw - has_extra - sltiu_index].instruction.getProcessedImmediate();
+                                found = true;
+                            } else if (andi_index != -1) {
+                                num_cases = insns[andi_index].instruction.getProcessedImmediate() + 1;
+                                found = true;
+                            } else if (i == 219382) {
+                                // Special hard case in copt where the initial sltiu is in another basic block
+                                found = true;
+                                num_cases = 13;
+                            } else if (i == 370995) {
+                                // Special hard case in copt where the initial sltiu is in another basic block
+                                found = true;
+                                num_cases = 12;
+                            } else if (i == 37743) {
+                                // Special hard case in edgcpfe where the initial sltiu is in another basic block
+                                if ((lw == 37740) && (addu_index == 37739)) {
+                                    // few extra checks to try to ensure we are in edgcpfe
+                                    if ((insns[lw].instruction.getRaw() == 0x8C3970A4) &&
+                                        (insns[addu_index].instruction.getRaw() == 0x00390821)) {
+                                        found = true;
+                                        num_cases = 6;
+                                    }
+                                }
+                            } else if (i == 208684) {
+                                // Special hard case in edgcpfe where the initial sltiu is in another basic block
+                                if ((lw == 208681) && (addu_index == 208680)) {
+                                    // few extra checks to try to ensure we are in edgcpfe
+                                    if ((insns[lw].instruction.getRaw() == 0x8C2B227C) &&
+                                        (insns[addu_index].instruction.getRaw() == 0x002B0821)) {
+                                        found = true;
+                                        num_cases = 8;
+                                    }
                                 }
                             }
                         }
 
                         if (found) {
-                            uint32_t jtbl_addr = insns[lw].linked_value;
-
                             if (is_pic) {
                                 insns[i - 1].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
                             }
 
+                            jtbl_sizes[jtbl_addr] = num_cases;
+
                             insn.jtbl_addr = jtbl_addr;
                             insn.num_cases = num_cases;
-                            insn.index_reg = insns[addu_index - 1].instruction.GetO32_rt();
+                            insn.index_reg = insns[sll_index].instruction.GetO32_rt();
+
                             insns[lw].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
+                            if (insns[lw].linked_insn != -1) {
+                                insns[insns[lw].linked_insn].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
+                            }
 
                             insns[addu_index].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
-
-                            insns[addu_index - 1].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
-
-                            if (!and_variant) {
-                                insns[addu_index - 2].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
-                            }
+                            insns[sll_index].patchInstruction(rabbitizer::InstrId::UniqueId::cpu_nop);
 
                             if (jtbl_addr < rodata_vaddr ||
                                 jtbl_addr + num_cases * sizeof(uint32_t) > rodata_vaddr + rodata_section_len) {
@@ -872,7 +938,9 @@ void pass1(void) {
                                 uint32_t target_addr = read_u32_be(rodata_section + (jtbl_addr - rodata_vaddr) +
                                                                    case_index * sizeof(uint32_t));
 
-                                target_addr += gp_value;
+                                if (!n32) {
+                                    target_addr += gp_value;
+                                }
                                 // printf("%08X\n", target_addr);
                                 label_addresses.insert(target_addr);
                             }
@@ -1238,7 +1306,11 @@ void pass3(void) {
                            jtbl_pos + insn.num_cases * sizeof(uint32_t) <= rodata_section_len);
 
                     for (uint32_t j = 0; j < insn.num_cases; j++) {
-                        uint32_t dest_addr = read_u32_be(rodata_section + jtbl_pos + j * sizeof(uint32_t)) + gp_value;
+                        uint32_t dest_addr = read_u32_be(rodata_section + jtbl_pos + j * sizeof(uint32_t));
+
+                        if (!n32) {
+                            dest_addr += gp_value;
+                        }
 
                         add_edge(i + 1, addr_to_i(dest_addr));
                     }
@@ -2739,8 +2811,12 @@ void dump_instr(int i) {
                 printf(";static void *const Lswitch%x[] = {\n", insn.jtbl_addr);
 
                 for (uint32_t case_index = 0; case_index < insn.num_cases; case_index++) {
-                    uint32_t dest_addr =
-                        read_u32_be(rodata_section + jtbl_pos + case_index * sizeof(uint32_t)) + gp_value;
+                    uint32_t dest_addr = read_u32_be(rodata_section + jtbl_pos + case_index * sizeof(uint32_t));
+
+                    if (!n32) {
+                        dest_addr += gp_value;
+                    }
+
                     printf("&&L%x,\n", dest_addr);
                     label_addresses.insert(dest_addr);
                 }
@@ -3149,22 +3225,34 @@ void dump_instr(int i) {
 
 void inspect_data_function_pointers(vector<pair<uint32_t, uint32_t>>& ret, const uint8_t* section,
                                     uint32_t section_vaddr, uint32_t len) {
-    for (uint32_t i = 0; i < len; i += 4) {
+    uint32_t i = 0;
+    while (i < len) {
+        // Skip jump tables
+        auto it = jtbl_sizes.find(section_vaddr + i);
+        if (it != jtbl_sizes.end()) {
+            i += it->second * 4;
+            continue;
+        }
+
         uint32_t addr = read_u32_be(section + i);
+
 
         if (addr == 0x430b00 || addr == 0x433b00) {
             // in as1, not function pointers (normal integers)
+            i += 4;
             continue;
         }
 
         if (addr == 0x4a0000) {
             // in copt
+            i += 4;
             continue;
         }
 
         if (section_vaddr + i >= procedure_table_start &&
             section_vaddr + i < procedure_table_start + procedure_table_len) {
             // some linking table with a "all" functions, in as1 5.3
+            i += 4;
             continue;
         }
 
@@ -3176,6 +3264,7 @@ void inspect_data_function_pointers(vector<pair<uint32_t, uint32_t>>& ret, const
             add_function(addr);
             functions.at(addr).referenced_by_function_pointer = true;
         }
+        i += 4;
     }
 }
 
@@ -3976,9 +4065,9 @@ int main(int argc, char* argv[]) {
 
     parse_elf(data, len);
     disassemble();
+    pass1();
     inspect_data_function_pointers(data_function_pointers, rodata_section, rodata_vaddr, rodata_section_len);
     inspect_data_function_pointers(data_function_pointers, data_section, data_vaddr, data_section_len);
-    pass1();
     pass2();
     pass3();
     pass4();
