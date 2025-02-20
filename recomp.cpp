@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
@@ -2104,6 +2105,20 @@ const char* dr(uint32_t reg) {
 
 void dump_instr(int i);
 
+void dump_function_name(uint32_t vaddr) {
+    auto name_it = symbol_names.find(vaddr);
+
+    if (name_it != symbol_names.end()) {
+        std::string name = name_it->second;
+        // Some names are mangled like set_tblmap..PAN
+        // Replace . with _ to make it a valid C identifier
+        std::replace(name.begin(), name.end(), '.', '_');
+        printf("f_%s", name.c_str());
+    } else {
+        printf("func_%x", vaddr);
+    }
+}
+
 void dump_cond_branch(int i, const char* lhs, const char* op, const char* rhs) {
     Insn& insn = insns[i];
 
@@ -2293,12 +2308,7 @@ void dump_jal(int i, uint32_t imm) {
             printf("tempret = ");
         }
 
-        if (!name.empty()) {
-            printf("f_%s", string(name).c_str());
-        } else {
-            printf("func_%x", imm);
-        }
-
+        dump_function_name(imm);
         printf("(mem, sp");
 
         if (f.v0_in) {
@@ -3131,14 +3141,7 @@ void dump_function_signature(Function& f, uint32_t vaddr) {
             break;
     }
 
-    auto name_it = symbol_names.find(vaddr);
-
-    if (name_it != symbol_names.end()) {
-        printf("f_%s", name_it->second.c_str());
-    } else {
-        printf("func_%x", vaddr);
-    }
-
+    dump_function_name(vaddr);
     printf("(uint8_t *mem, uint32_t sp");
 
     if (f.v0_in) {
@@ -3247,14 +3250,7 @@ void dump_c(void) {
                     printf("return ");
                 }
 
-                auto name_it = symbol_names.find(it.first);
-
-                if (name_it != symbol_names.end()) {
-                    printf("f_%s", name_it->second.c_str());
-                } else {
-                    printf("func_%x", it.first);
-                }
-
+                dump_function_name(it.first);
                 printf("(mem, sp");
 
                 for (unsigned int i = 0; i < f.nargs; i++) {
