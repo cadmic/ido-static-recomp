@@ -20,7 +20,7 @@ ASAN ?= 0
 ifeq ($(VERSION),7.1)
   IDO_VERSION := IDO71
 # copt currently does not build
-  IDO_TC      := cc acpp as0 as1 cfe ugen ujoin uld umerge uopt usplit upas edgcpfe NCC
+  IDO_TC      := cc acpp as0 as1 cfe ugen ujoin uld umerge uopt usplit upas edgcpfe NCC ld
   IDO_LIBS    :=
 else ifeq ($(VERSION),5.3)
   IDO_VERSION := IDO53
@@ -126,10 +126,14 @@ TARGET_BINARIES := $(foreach binary,$(IDO_TC),$(BUILT_BIN)/$(binary))
 # create build directories
 $(shell mkdir -p $(BUILT_BIN))
 
+RECOMP_FLAGS :=
+
 # per-file flags
 # 5.3 ugen relies on UB stack reads
 # to emulate, pass the conservative flag to `recomp`
 $(BUILD_BASE)/5.3/ugen.c: RECOMP_FLAGS := --conservative
+# 7.1 ld uses N32 ABI
+$(BUILD_BASE)/7.1/ld.c: RECOMP_FLAGS := --n32
 
 $(RECOMP_ELF): CXXFLAGS  += -I$(RABBITIZER)/include -I$(RABBITIZER)/cplusplus/include
 $(RECOMP_ELF): LDFLAGS   += -L$(RABBITIZER)/build -lrabbitizerpp
@@ -145,14 +149,17 @@ endif
 
 LIBC_WARNINGS := $(WARNINGS) -Wno-unused-parameter -Wno-deprecated-declarations
 
-LIBC_IMPLS    := libc_impl_53 libc_impl_71
-LIBC_IMPL     := libc_impl_$(subst .,,$(VERSION))
+LIBC_IMPLS    := libc_impl_53_o32 libc_impl_71_o32 libc_impl_71_n32
+LIBC_IMPL     := libc_impl_$(subst .,,$(VERSION))_o32
 
-%/libc_impl_53.o: CFLAGS += -DIDO53
-%/libc_impl_71.o: CFLAGS += -DIDO71
+%/libc_impl_53_o32.o: CFLAGS += -DIDO53 -DMIPS_ABI_O32
+%/libc_impl_71_o32.o: CFLAGS += -DIDO71 -DMIPS_ABI_O32
+%/libc_impl_71_n32.o: CFLAGS += -DIDO71 -DMIPS_ABI_N32
 
 # edgcpfe 7.1 uses libc 5.3
-%/7.1/out/edgcpfe:: LIBC_IMPL := libc_impl_53
+%/7.1/out/edgcpfe: LIBC_IMPL := libc_impl_53_o32
+# ld 7.1 uses N32 ABI
+%/7.1/out/ld: LIBC_IMPL := libc_impl_71_n32
 
 #### Main Targets ###
 
