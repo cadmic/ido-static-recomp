@@ -244,6 +244,7 @@ map<uint32_t, string> symbol_names;
 
 vector<pair<uint32_t, uint32_t>> data_function_pointers;
 set<uint32_t> la_function_pointers;
+set<uint32_t> extern_function_pointers;
 map<uint32_t, Function> functions;
 map<uint32_t, uint32_t> jtbl_sizes;
 uint32_t main_addr;
@@ -461,6 +462,8 @@ const struct ExternFunction {
     { "__nw__FUi", "pu", 0 },
     { "__dl__FPv", "vp", 0 },
 };
+
+map<uint32_t, const ExternFunction*> extern_functions_by_addr;
 
 void disassemble(void) {
     uint32_t i;
@@ -1181,6 +1184,11 @@ void pass2(void) {
 #if INSPECT_FUNCTION_POINTERS
                 fprintf(stderr, "la function pointer: 0x%x at 0x%x\n", faddr, addr);
 #endif
+            } else if (extern_functions_by_addr.find(faddr) != extern_functions_by_addr.end()) {
+                extern_function_pointers.insert(faddr);
+#if INSPECT_FUNCTION_POINTERS
+                fprintf(stderr, "la function pointer: 0x%x at 0x%x (extern)\n", faddr, addr);
+#endif
             }
         }
     }
@@ -1740,29 +1748,16 @@ void pass4(void) {
                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
             } else if (e.extern_function_call) {
-                string_view name;
                 uint32_t address = insns[i - 1].getAddress();
 
                 // TODO: Can this only ever be a J-type instruction?
-                auto it = symbol_names.find(address);
-                const ExternFunction* found_fn = nullptr;
-
-                if (it != symbol_names.end()) {
-                    name = it->second;
-
-                    for (auto& fn : extern_functions) {
-                        if (name == fn.name) {
-                            found_fn = &fn;
-                            break;
-                        }
-                    }
-
-                    if (found_fn == nullptr) {
-                        fprintf(stderr, "missing extern function: %s\n", string(name).c_str());
-                    }
+                auto it = extern_functions_by_addr.find(address);
+                if (it == extern_functions_by_addr.end()) {
+                    fprintf(stderr, "missing extern function: %s (0x%x)\n", symbol_names.at(address).c_str(), address);
+                    assert(0);
                 }
 
-                assert(found_fn);
+                const ExternFunction* found_fn = it->second;
 
                 char ret_type = found_fn->params[0];
 
@@ -1904,23 +1899,9 @@ void pass5(void) {
                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
             } else if (e.extern_function_call) {
-                string_view name;
-                const ExternFunction* found_fn = nullptr;
                 uint32_t address = insns[i - 2].getAddress();
                 // TODO: Can this only ever be a J-type instruction?
-                auto it = symbol_names.find(address);
-
-                if (it != symbol_names.end()) {
-                    name = it->second;
-                    for (auto& fn : extern_functions) {
-                        if (name == fn.name) {
-                            found_fn = &fn;
-                            break;
-                        }
-                    }
-                }
-
-                assert(found_fn);
+                const ExternFunction* found_fn = extern_functions_by_addr.at(address);
 
                 uint64_t args = 1U;
 
@@ -2245,163 +2226,161 @@ void dump_cond_branch_likely(int i, const char* lhs, const char* op, const char*
     label_addresses.insert(target);
 }
 
-void dump_jal(int i, uint32_t imm) {
-    string_view name;
-    auto it = symbol_names.find(imm);
-    const ExternFunction* found_fn = nullptr;
+void dump_extern_function_call(const ExternFunction* found_fn, uint32_t addr) {
+    string_view name = symbol_names.at(addr);
 
-    // Check for an external function at the address in the immediate. If it does not exist, function is internal
-    if (it != symbol_names.end()) {
-        name = it->second;
-        for (auto& fn : extern_functions) {
-            if (name == fn.name) {
-                found_fn = &fn;
-                break;
-            }
+    if (found_fn->flags & FLAG_VARARG) {
+        for (int j = 0; j < 4; j++) {
+            printf("MEM_U32(sp + %d) = %s;\n", j * 4, r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
         }
+    }
+
+    const char ret_type = found_fn->params[0];
+
+    switch (ret_type) {
+        case 'v':
+            break;
+
+        case 'i':
+        case 'u':
+        case 'p':
+            printf("%s = ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
+            break;
+
+        case 'f':
+            printf("%s = ", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fv0));
+            break;
+
+        case 'd':
+            printf("tempf64 = ");
+            break;
+
+        case 'l':
+        case 'j':
+            // for O32, will be split into two registers below
+            printf("%s = ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
+            break;
+    }
+
+    printf("wrapper_%s(", string(name).c_str());
+
+    bool first = true;
+
+    if (!(found_fn->flags & FLAG_NO_MEM)) {
+        printf("mem");
+        first = false;
+    }
+
+    int pos = 0;
+    int pos_float = 0;
+    bool only_floats_so_far = true;
+    bool needs_sp = false;
+
+    for (const char* p = &found_fn->params[1]; *p != '\0'; ++p) {
+        if (!first) {
+            printf(", ");
+        }
+
+        first = false;
+
+        switch (*p) {
+            case 't':
+                printf("trampoline, ");
+                needs_sp = true;
+                // fallthrough
+            case 'i':
+            case 'u':
+            case 'p':
+                only_floats_so_far = false;
+                if (pos < 4) {
+                    printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                } else {
+                    printf("MEM_%c32(sp + %d)", *p == 'i' ? 'S' : 'U', pos * 4);
+                }
+                ++pos;
+                break;
+
+            case 'f':
+                if (only_floats_so_far && pos_float < 4) {
+                    printf("%s", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                    pos_float += 2;
+                } else if (pos < 4) {
+                    printf("BITCAST_U32_TO_F32((uint32_t)%s)", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                } else {
+                    printf("BITCAST_U32_TO_F32(MEM_U32(sp + %d))", pos * 4);
+                }
+                ++pos;
+                break;
+
+            case 'd':
+                if (pos % 1 != 0) {
+                    ++pos;
+                }
+                if (only_floats_so_far && pos_float < 4) {
+                    printf("double_from_FloatReg(%s)",
+                           dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                    pos_float += 2;
+                } else if (pos < 4) {
+                    printf("BITCAST_U64_TO_F64(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
+                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
+                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                } else {
+                    printf("BITCAST_U64_TO_F64(((uint64_t)MEM_U32(sp + %d) << 32) | "
+                           "(uint64_t)MEM_U32(sp + "
+                           "%d))",
+                           pos * 4, (pos + 1) * 4);
+                }
+                pos += 2;
+                break;
+
+            case 'l':
+            case 'j':
+                if (pos % 1 != 0) {
+                    ++pos;
+                }
+                only_floats_so_far = false;
+                if (*p == 'l') {
+                    printf("(int64_t)");
+                }
+                if (pos < 4) {
+                    printf("(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
+                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
+                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                } else {
+                    printf("(((uint64_t)MEM_U32(sp + %d) << 32) | (uint64_t)MEM_U32(sp + %d))", pos * 4,
+                           (pos + 1) * 4);
+                }
+                pos += 2;
+                break;
+        }
+    }
+
+    if ((found_fn->flags & FLAG_VARARG) || needs_sp) {
+        printf("%s%s", first ? "" : ", ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp));
+    }
+
+    printf(");\n");
+
+    if (ret_type == 'l' || ret_type == 'j') {
+        printf("%s = %s;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
+        printf("%s = %s >> 32;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
+    } else if (ret_type == 'd') {
+        printf("%s = FloatReg_from_double(tempf64);\n", dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fv0));
+    }
+}
+
+void dump_jal(int i, uint32_t imm) {
+    // Check for an external function at the address in the immediate. If it does not exist, function is internal
+    const ExternFunction* found_fn = nullptr;
+    auto it = extern_functions_by_addr.find(imm);
+    if (it != extern_functions_by_addr.end()) {
+        found_fn = it->second;
     }
 
     dump_instr(i + 1);
 
     if (found_fn != nullptr) {
-        if (found_fn->flags & FLAG_VARARG) {
-            for (int j = 0; j < 4; j++) {
-                printf("MEM_U32(sp + %d) = %s;\n", j * 4, r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
-            }
-        }
-
-        const char ret_type = found_fn->params[0];
-
-        switch (ret_type) {
-            case 'v':
-                break;
-
-            case 'i':
-            case 'u':
-            case 'p':
-                printf("%s = ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
-                break;
-
-            case 'f':
-                printf("%s = ", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fv0));
-                break;
-
-            case 'd':
-                printf("tempf64 = ");
-                break;
-
-            case 'l':
-            case 'j':
-                // for O32, will be split into two registers below
-                printf("%s = ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
-                break;
-        }
-
-        printf("wrapper_%s(", string(name).c_str());
-
-        bool first = true;
-
-        if (!(found_fn->flags & FLAG_NO_MEM)) {
-            printf("mem");
-            first = false;
-        }
-
-        int pos = 0;
-        int pos_float = 0;
-        bool only_floats_so_far = true;
-        bool needs_sp = false;
-
-        for (const char* p = &found_fn->params[1]; *p != '\0'; ++p) {
-            if (!first) {
-                printf(", ");
-            }
-
-            first = false;
-
-            switch (*p) {
-                case 't':
-                    printf("trampoline, ");
-                    needs_sp = true;
-                    // fallthrough
-                case 'i':
-                case 'u':
-                case 'p':
-                    only_floats_so_far = false;
-                    if (pos < 4) {
-                        printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                    } else {
-                        printf("MEM_%c32(sp + %d)", *p == 'i' ? 'S' : 'U', pos * 4);
-                    }
-                    ++pos;
-                    break;
-
-                case 'f':
-                    if (only_floats_so_far && pos_float < 4) {
-                        printf("%s", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
-                        pos_float += 2;
-                    } else if (pos < 4) {
-                        printf("BITCAST_U32_TO_F32((uint32_t)%s)", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                    } else {
-                        printf("BITCAST_U32_TO_F32(MEM_U32(sp + %d))", pos * 4);
-                    }
-                    ++pos;
-                    break;
-
-                case 'd':
-                    if (pos % 1 != 0) {
-                        ++pos;
-                    }
-                    if (only_floats_so_far && pos_float < 4) {
-                        printf("double_from_FloatReg(%s)",
-                               dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
-                        pos_float += 2;
-                    } else if (pos < 4) {
-                        printf("BITCAST_U64_TO_F64(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
-                               r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
-                               r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                    } else {
-                        printf("BITCAST_U64_TO_F64(((uint64_t)MEM_U32(sp + %d) << 32) | "
-                               "(uint64_t)MEM_U32(sp + "
-                               "%d))",
-                               pos * 4, (pos + 1) * 4);
-                    }
-                    pos += 2;
-                    break;
-
-                case 'l':
-                case 'j':
-                    if (pos % 1 != 0) {
-                        ++pos;
-                    }
-                    only_floats_so_far = false;
-                    if (*p == 'l') {
-                        printf("(int64_t)");
-                    }
-                    if (pos < 4) {
-                        printf("(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
-                               r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
-                               r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                    } else {
-                        printf("(((uint64_t)MEM_U32(sp + %d) << 32) | (uint64_t)MEM_U32(sp + %d))", pos * 4,
-                               (pos + 1) * 4);
-                    }
-                    pos += 2;
-                    break;
-            }
-        }
-
-        if ((found_fn->flags & FLAG_VARARG) || needs_sp) {
-            printf("%s%s", first ? "" : ", ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp));
-        }
-
-        printf(");\n");
-
-        if (ret_type == 'l' || ret_type == 'j') {
-            printf("%s = %s;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
-            printf("%s = %s >> 32;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
-        } else if (ret_type == 'd') {
-            printf("%s = FloatReg_from_double(tempf64);\n", dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fv0));
-        }
+        dump_extern_function_call(found_fn, imm);
     } else {
         Function& f = functions.find(imm)->second;
 
@@ -3022,6 +3001,8 @@ void dump_instr(int i) {
             if ((text_vaddr <= addr) && (addr < text_vaddr + text_section_len)) {
                 printf(" // function pointer");
                 label_addresses.insert(addr);
+            } else if (extern_functions_by_addr.find(addr) != extern_functions_by_addr.end()) {
+                printf(" // function pointer (extern)");
             }
             printf("\n");
         } break;
@@ -3465,6 +3446,8 @@ void dump_c(void) {
 
     if (!data_function_pointers.empty() || !la_function_pointers.empty()) {
         printf("struct ReturnValue trampoline(uint8_t *mem, uint32_t sp, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint32_t fp_dest) {\n");
+        printf("uint64_t v0 = 0, v1 = 0;\n");
+        printf("double tempf64;\n");
         printf("switch (fp_dest) {\n");
 
         for (auto& it : functions) {
@@ -3496,6 +3479,12 @@ void dump_c(void) {
                     printf(";\n");
                 }
             }
+        }
+
+        for (auto& addr : extern_function_pointers) {
+            printf("case 0x%x:\n", addr);
+            dump_extern_function_call(extern_functions_by_addr.at(addr), addr);
+            printf("return (struct ReturnValue){v0, v1};\n");
         }
 
         printf("default: abort();");
@@ -3929,6 +3918,15 @@ void parse_elf(const uint8_t* data, size_t file_len) {
         gp_value_adj = gp_adj;
 
         free(local_entries);
+    }
+
+    // Find extern functions
+    for (auto& pair : symbol_names) {
+        for (auto& fn : extern_functions) {
+            if (pair.second == fn.name) {
+                extern_functions_by_addr[pair.first] = &fn;
+            }
+        }
     }
 
     // add relocations
