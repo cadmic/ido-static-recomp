@@ -207,6 +207,8 @@ struct Function {
 bool conservative;
 bool n32;
 
+int max_args;
+
 const uint8_t* text_section;
 uint32_t text_section_len;
 uint32_t text_vaddr;
@@ -1671,25 +1673,41 @@ uint64_t get_all_source_reg_mask(const rabbitizer::InstructionCpu& instr) {
 
 void pass4(void) {
     vector<uint32_t> q; // "queue"
-    uint64_t livein_func_start = 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
+    uint64_t livein_main_start = 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
+                                      map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
+                                      map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp) |
+                                      map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero);
+
+    uint64_t arg_regs = 0;
+    for (int j = 0; j < max_args; j++) {
+        arg_regs |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
+    }
+
+    uint64_t livein_func_start = 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp) |
+                                      map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero) |
+                                      arg_regs;
+
+    // The same for both O32 and N32 (except for $gp, which we don't care about)
+    uint64_t caller_saved_regs = map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
                                  map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp) |
-                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero);
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
+                                 temporary_regs();
 
     q.push_back(main_addr);
-    insns[addr_to_i(main_addr)].f_livein = livein_func_start;
+    insns[addr_to_i(main_addr)].f_livein = livein_main_start;
 
     for (auto& it : data_function_pointers) {
         q.push_back(it.second);
-        insns[addr_to_i(it.second)].f_livein = livein_func_start |
-                                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                                               map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3);
+        insns[addr_to_i(it.second)].f_livein = livein_func_start;
     }
 
     for (auto& addr : la_function_pointers) {
         q.push_back(addr);
-        insns[addr_to_i(addr)].f_livein = livein_func_start | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                                          map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3);
+        insns[addr_to_i(addr)].f_livein = livein_func_start;
     }
 
     while (!q.empty()) {
@@ -1733,20 +1751,9 @@ void pass4(void) {
                             map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) |
                             map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero);
             } else if (e.function_entry) {
-                new_live &= 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero);
+                new_live &= livein_func_start | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0);
             } else if (e.function_call) {
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
+                new_live &= ~caller_saved_regs;
             } else if (e.extern_function_call) {
                 uint32_t address = insns[i - 1].getAddress();
 
@@ -1761,12 +1768,7 @@ void pass4(void) {
 
                 char ret_type = found_fn->params[0];
 
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
+                new_live &= ~caller_saved_regs;
 
                 switch (ret_type) {
                     case 'i':
@@ -1786,17 +1788,16 @@ void pass4(void) {
 
                     case 'l':
                     case 'j':
-                        new_live |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                                    map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1);
+                        if (n32) {
+                            new_live |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0);
+                        } else {
+                            new_live |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
+                                        map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1);
+                        }
                         break;
                 }
             } else if (e.function_pointer_call) {
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
+                new_live &= ~caller_saved_regs;
                 new_live |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
                             map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1);
             }
@@ -1811,6 +1812,25 @@ void pass4(void) {
 
 void pass5(void) {
     vector<uint32_t> q; // "queue"
+
+    uint64_t arg_regs = 1U;
+    for (int j = 0; j < max_args; j++) {
+        arg_regs |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
+    }
+
+    uint64_t livein_func_start = 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp) |
+                                      map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero) |
+                                      arg_regs;
+
+    // The same for both O32 and N32 (except for $gp, which we don't care about)
+    uint64_t caller_saved_regs = map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
+                                 map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
+                                 temporary_regs();
 
     assert(functions.count(main_addr));
 
@@ -1885,19 +1905,9 @@ void pass5(void) {
                 new_live &= 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
                             map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1);
             } else if (e.function_entry) {
-                new_live &= 1U | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp);
+                new_live &= livein_func_start | map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0);
             } else if (e.function_call) {
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
+                new_live &= ~caller_saved_regs;
             } else if (e.extern_function_call) {
                 uint32_t address = insns[i - 2].getAddress();
                 // TODO: Can this only ever be a J-type instruction?
@@ -1906,8 +1916,8 @@ void pass5(void) {
                 uint64_t args = 1U;
 
                 if (found_fn->flags & FLAG_VARARG) {
-                    // Assume the worst, that all four registers are used
-                    for (int j = 0; j < 4; j++) {
+                    // Assume the worst, that all registers are used
+                    for (int j = 0; j < max_args; j++) {
                         args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
                             (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
                     }
@@ -1918,80 +1928,90 @@ void pass5(void) {
                 bool only_floats_so_far = true;
 
                 for (const char* p = found_fn->params + 1; *p != '\0'; ++p) {
-                    switch (*p) {
-                        case 'i':
-                        case 'u':
-                        case 'p':
-                        case 't':
-                            only_floats_so_far = false;
-                            if (pos < 4) {
-                                args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                    (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                            }
-                            ++pos;
-                            break;
-
-                        case 'f':
-                            if (only_floats_so_far && pos_float < 4) {
-                                pos_float += 2;
-                            } else if (pos < 4) {
-                                args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                    (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                            }
-                            ++pos;
-                            break;
-
-                        case 'd':
-                            // !!!
-                            if (pos % 1 != 0) {
+                    if (n32) {
+                        // N32
+                        switch (*p) {
+                            case 'i':
+                            case 'u':
+                            case 'p':
+                            case 't':
+                            case 'l':
+                            case 'j':
+                                if (pos < 8) {
+                                    args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                        (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                                }
                                 ++pos;
-                            }
-                            if (only_floats_so_far && pos_float < 4) {
-                                pos_float += 2;
-                            } else if (pos < 4) {
-                                args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos)) |
-                                        map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                            }
-                            pos += 2;
-                            break;
+                                break;
 
-                        case 'l':
-                        case 'j':
-                            if (pos % 1 != 0) {
+                            case 'f':
+                            case 'd':
+                                break;
+                        }
+                    } else {
+                        // O32
+                        switch (*p) {
+                            case 'i':
+                            case 'u':
+                            case 'p':
+                            case 't':
+                                only_floats_so_far = false;
+                                if (pos < 4) {
+                                    args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                        (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                                }
                                 ++pos;
-                            }
-                            only_floats_so_far = false;
-                            if (pos < 4) {
-                                args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos)) |
-                                        map_reg((rabbitizer::Registers::Cpu::GprO32)(
-                                            (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                            }
-                            pos += 2;
-                            break;
+                                break;
+
+                            case 'f':
+                                if (only_floats_so_far && pos_float < 4) {
+                                    pos_float += 2;
+                                } else if (pos < 4) {
+                                    args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                        (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                                }
+                                ++pos;
+                                break;
+
+                            case 'd':
+                                // !!!
+                                if (pos % 1 != 0) {
+                                    ++pos;
+                                }
+                                if (only_floats_so_far && pos_float < 4) {
+                                    pos_float += 2;
+                                } else if (pos < 4) {
+                                    args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                                (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos)) |
+                                            map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                                (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                                }
+                                pos += 2;
+                                break;
+
+                            case 'l':
+                            case 'j':
+                                if (pos % 1 != 0) {
+                                    ++pos;
+                                }
+                                only_floats_so_far = false;
+                                if (pos < 4) {
+                                    args |= map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                                (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos)) |
+                                            map_reg((rabbitizer::Registers::Cpu::GprO32)(
+                                                (int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                                }
+                                pos += 2;
+                                break;
+                        }
                     }
                 }
                 args |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp);
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
+                new_live &= ~caller_saved_regs;
                 new_live |= args;
             } else if (e.function_pointer_call) {
-                new_live &= ~(map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3) |
-                              map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1) | temporary_regs());
-                new_live |= map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2) |
-                            map_reg(rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3);
+                new_live &= ~caller_saved_regs;
+                new_live |= arg_regs;
             }
 
             if ((insns[e.i].b_liveout | new_live) != insns[e.i].b_liveout) {
@@ -2028,7 +2048,7 @@ void pass6(void) {
 
         Insn& insn = insns.at(addr_to_i(addr));
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < max_args; i++) {
             if (insn.f_livein & insn.b_livein &
                 map_reg(
                     (rabbitizer::Registers::Cpu::GprO32)((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + i))) {
@@ -2230,8 +2250,13 @@ void dump_extern_function_call(const ExternFunction* found_fn, uint32_t addr) {
     string_view name = symbol_names.at(addr);
 
     if (found_fn->flags & FLAG_VARARG) {
+        if (n32) {
+            printf("varargs.stack_base = sp;\n");
+        } else {
+            printf("varargs.stack_base = sp + 0x10;\n");
+        }
         for (int j = 0; j < 4; j++) {
-            printf("MEM_U32(sp + %d) = %s;\n", j * 4, r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
+            printf("varargs.regs[%d] = %s;\n", j, r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
         }
     }
 
@@ -2273,6 +2298,7 @@ void dump_extern_function_call(const ExternFunction* found_fn, uint32_t addr) {
 
     int pos = 0;
     int pos_float = 0;
+    int pos_stack = 0;
     bool only_floats_so_far = true;
     bool needs_sp = false;
 
@@ -2283,85 +2309,144 @@ void dump_extern_function_call(const ExternFunction* found_fn, uint32_t addr) {
 
         first = false;
 
-        switch (*p) {
-            case 't':
-                printf("trampoline, ");
-                needs_sp = true;
-                // fallthrough
-            case 'i':
-            case 'u':
-            case 'p':
-                only_floats_so_far = false;
-                if (pos < 4) {
-                    printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                } else {
-                    printf("MEM_%c32(sp + %d)", *p == 'i' ? 'S' : 'U', pos * 4);
-                }
-                ++pos;
-                break;
+        if (n32) {
+            // N32
+            switch (*p) {
+                case 't':
+                    printf("libc_trampoline, ");
+                    needs_sp = true;
+                    // fallthrough
+                case 'i':
+                case 'u':
+                case 'p':
+                    if (pos < 8) {
+                        printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                        ++pos;
+                    } else {
+                        printf("MEM_U32(sp + %d + 4)", pos_stack * 8, pos_stack * 8);
+                        ++pos_stack;
+                    }
+                    break;
 
-            case 'f':
-                if (only_floats_so_far && pos_float < 4) {
-                    printf("%s", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
-                    pos_float += 2;
-                } else if (pos < 4) {
-                    printf("BITCAST_U32_TO_F32((uint32_t)%s)", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
-                } else {
-                    printf("BITCAST_U32_TO_F32(MEM_U32(sp + %d))", pos * 4);
-                }
-                ++pos;
-                break;
+                case 'f':
+                    if (pos_float < 8) {
+                        printf("%s", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                        ++pos_float;
+                    } else {
+                        printf("BITCAST_U32_TO_F32(MEM_U32(sp + %d))", pos_stack * 8);
+                        ++pos_stack;
+                    }
+                    break;
 
-            case 'd':
-                if (pos % 1 != 0) {
+                case 'd':
+                    if (pos_float < 8) {
+                        printf("double_from_FloatReg(%s)",
+                            dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                        ++pos_float;
+                    } else {
+                        printf("BITCAST_U64_TO_F64(((uint64_t)MEM_U32(sp + %d) << 32) | MEM_U32(sp + %d + 4))", pos_stack * 8, pos_stack * 8);
+                        ++pos_stack;
+                    }
+                    break;
+
+                case 'l':
+                case 'j':
+                    if (pos < 8) {
+                        printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                        ++pos;
+                    } else {
+                        printf("((uint64_t)MEM_U32(sp + %d) << 32) | MEM_U32(sp + %d + 4)", pos_stack * 8, pos_stack * 8);
+                        ++pos_stack;
+                    }
+                    break;
+
+            }
+        } else {
+            // O32
+            switch (*p) {
+                case 't':
+                    printf("trampoline, ");
+                    needs_sp = true;
+                    // fallthrough
+                case 'i':
+                case 'u':
+                case 'p':
+                    only_floats_so_far = false;
+                    if (pos < 4) {
+                        printf("%s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                    } else {
+                        printf("MEM_%c32(sp + %d)", *p == 'i' ? 'S' : 'U', pos * 4);
+                    }
                     ++pos;
-                }
-                if (only_floats_so_far && pos_float < 4) {
-                    printf("double_from_FloatReg(%s)",
-                           dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
-                    pos_float += 2;
-                } else if (pos < 4) {
-                    printf("BITCAST_U64_TO_F64(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
-                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
-                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                } else {
-                    printf("BITCAST_U64_TO_F64(((uint64_t)MEM_U32(sp + %d) << 32) | "
-                           "(uint64_t)MEM_U32(sp + "
-                           "%d))",
-                           pos * 4, (pos + 1) * 4);
-                }
-                pos += 2;
-                break;
+                    break;
 
-            case 'l':
-            case 'j':
-                if (pos % 1 != 0) {
+                case 'f':
+                    if (only_floats_so_far && pos_float < 4) {
+                        printf("%s", fr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                        pos_float += 2;
+                    } else if (pos < 4) {
+                        printf("BITCAST_U32_TO_F32(%s)", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos));
+                    } else {
+                        printf("BITCAST_U32_TO_F32(MEM_U32(sp + %d))", pos * 4);
+                    }
                     ++pos;
-                }
-                only_floats_so_far = false;
-                if (*p == 'l') {
-                    printf("(int64_t)");
-                }
-                if (pos < 4) {
-                    printf("(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
-                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
-                           r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
-                } else {
-                    printf("(((uint64_t)MEM_U32(sp + %d) << 32) | (uint64_t)MEM_U32(sp + %d))", pos * 4,
-                           (pos + 1) * 4);
-                }
-                pos += 2;
-                break;
+                    break;
+
+                case 'd':
+                    if (pos % 1 != 0) {
+                        ++pos;
+                    }
+                    if (only_floats_so_far && pos_float < 4) {
+                        printf("double_from_FloatReg(%s)",
+                            dr((int)rabbitizer::Registers::Cpu::Cop1O32::COP1_O32_fa0 + pos_float));
+                        pos_float += 2;
+                    } else if (pos < 4) {
+                        printf("BITCAST_U64_TO_F64(((uint64_t)%s << 32) | (uint64_t)%s)",
+                            r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
+                            r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                    } else {
+                        printf("BITCAST_U64_TO_F64(((uint64_t)MEM_U32(sp + %d) << 32) | "
+                            "(uint64_t)MEM_U32(sp + "
+                            "%d))",
+                            pos * 4, (pos + 1) * 4);
+                    }
+                    pos += 2;
+                    break;
+
+                case 'l':
+                case 'j':
+                    if (pos % 1 != 0) {
+                        ++pos;
+                    }
+                    only_floats_so_far = false;
+                    if (*p == 'l') {
+                        printf("(int64_t)");
+                    }
+                    if (pos < 4) {
+                        printf("(((uint64_t)(uint32_t)%s << 32) | (uint64_t)(uint32_t)%s)",
+                            r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos),
+                            r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + pos + 1));
+                    } else {
+                        printf("(((uint64_t)MEM_U32(sp + %d) << 32) | (uint64_t)MEM_U32(sp + %d))", pos * 4,
+                            (pos + 1) * 4);
+                    }
+                    pos += 2;
+                    break;
+            }
         }
     }
 
-    if ((found_fn->flags & FLAG_VARARG) || needs_sp) {
+    if (found_fn->flags & FLAG_VARARG) {
+        printf("%s(varargs.pos = %d, &varargs)", first ? "" : ", ", pos);
+    }
+
+    if (needs_sp) {
         printf("%s%s", first ? "" : ", ", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_sp));
     }
 
     printf(");\n");
 
-    if (ret_type == 'l' || ret_type == 'j') {
+    if (!n32 && (ret_type == 'l' || ret_type == 'j')) {
         printf("%s = %s;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
         printf("%s = %s >> 32;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0), r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
     } else if (ret_type == 'd') {
@@ -2830,11 +2915,11 @@ void dump_instr(int i) {
         case rabbitizer::InstrId::UniqueId::cpu_jalr:
             printf("fp_dest = %s;\n", r((int)insn.instruction.GetO32_rs()));
             dump_instr(i + 1);
-            printf("tempret = trampoline(mem, sp, %s, %s, %s, %s, fp_dest);\n",
-                   r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0),
-                   r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a1),
-                   r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a2),
-                   r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a3));
+            printf("tempret = trampoline(mem, sp");
+            for (int j = 0; j < max_args; j++) {
+                printf(", %s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
+            }
+            printf(", fp_dest);\n");
             printf("%s = tempret.v0;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v0));
             printf("%s = tempret.v1;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_v1));
             printf("goto L%x;\n", text_vaddr + (i + 2) * 4);
@@ -3445,7 +3530,15 @@ void dump_c(void) {
     }
 
     if (!data_function_pointers.empty() || !la_function_pointers.empty()) {
-        printf("struct ReturnValue trampoline(uint8_t *mem, uint32_t sp, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint32_t fp_dest) {\n");
+        if (n32) {
+            printf("struct ReturnValue libc_trampoline(uint8_t *mem, uint32_t sp, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint32_t fp_dest);\n");
+        }
+
+        printf("struct ReturnValue trampoline(uint8_t *mem, uint32_t sp");
+        for (int i = 0; i < max_args; i++) {
+            printf(", uint64_t %s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + i));
+        }
+        printf(", uint32_t fp_dest) {\n");
         printf("uint64_t v0 = 0, v1 = 0;\n");
         printf("double tempf64;\n");
         printf("switch (fp_dest) {\n");
@@ -3466,7 +3559,7 @@ void dump_c(void) {
                 printf("(mem, sp");
 
                 for (unsigned int i = 0; i < f.nargs; i++) {
-                    printf(", a%d", i);
+                    printf(", %s", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + i));
                 }
 
                 printf(")");
@@ -3490,6 +3583,12 @@ void dump_c(void) {
         printf("default: abort();");
         printf("}\n");
         printf("}\n");
+
+        if (n32) {
+            printf("struct ReturnValue libc_trampoline(uint8_t *mem, uint32_t sp, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint32_t fp_dest) {\n");
+            printf("return trampoline(mem, sp, a0, a1, a2, a3, 0, 0, 0, 0, fp_dest);\n");
+            printf("}\n");
+        }
     }
 
     printf("int run(uint8_t *mem, int argc, char *argv[]) {\n");
@@ -3556,13 +3655,17 @@ void dump_c(void) {
         printf(" {\n");
         printf("const uint64_t zero = 0;\n");
 
+        printf("uint64_t at = 0, v1 = 0,\n");
+        if (n32) {
+            printf("t4 = 0, t5 = 0, t6 = 0, t7 = 0,\n");
+        } else {
+            printf("t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, t6 = 0, t7 = 0,\n");
+        }
         if (!conservative) {
-            printf("uint64_t at = 0, v1 = 0, t0 = 0, t1 = 0, t2 = 0,\n");
-            printf("t3 = 0, t4 = 0, t5 = 0, t6 = 0, t7 = 0, s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0,\n");
+            printf("s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0,\n");
             printf("s6 = 0, s7 = 0, t8 = 0, t9 = 0, gp = 0, fp = 0, s8 = 0, ra = 0;\n");
         } else {
-            printf("uint64_t at = 0, v1 = 0, t0 = 0, t1 = 0, t2 = 0,\n");
-            printf("t3 = 0, t4 = 0, t5 = 0, t6 = 0, t7 = 0, t8 = 0, t9 = 0, gp = 0x10000, ra = 0x10000;\n");
+            printf("t8 = 0, t9 = 0, gp = 0x10000, ra = 0x10000;\n");
         }
 
         printf("uint64_t lo = 0, hi = 0;\n");
@@ -3576,7 +3679,7 @@ void dump_c(void) {
             printf("uint64_t v0 = 0;\n");
         }
 
-        for (uint32_t j = f.nargs; j < 4; j++) {
+        for (int j = f.nargs; j < max_args; j++) {
             printf("uint64_t %s = 0;\n", r((int)rabbitizer::Registers::Cpu::GprO32::GPR_O32_a0 + j));
         }
 
@@ -4110,6 +4213,8 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Usage: %s [--conservative] [--n32] <elf_file>\n", argv[0]);
         return 1;
     }
+
+    max_args = n32 ? 8 : 4;
 
     const char* filename = argv[argi];
 

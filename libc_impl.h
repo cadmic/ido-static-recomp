@@ -1,6 +1,7 @@
 #ifndef LIBC_IMPL_H
 #define LIBC_IMPL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 union FloatReg {
@@ -14,6 +15,12 @@ struct ReturnValue {
     uint64_t v1;
 };
 
+struct Varargs {
+    uint64_t regs[8];
+    uint32_t pos;
+    uint32_t stack_base;
+};
+
 typedef struct ReturnValue (*fptr_trampoline)(uint8_t* mem, uint32_t sp, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                                               uint32_t fp_dest);
 
@@ -24,10 +31,10 @@ uint32_t wrapper_sbrk(uint8_t *mem, int increment);
 uint32_t wrapper_malloc(uint8_t *mem, uint32_t size);
 uint32_t wrapper_calloc(uint8_t *mem, uint32_t num, uint32_t size);
 uint32_t wrapper_realloc(uint8_t *mem, uint32_t data_addr, uint32_t size);
-int wrapper_fscanf(uint8_t *mem, uint32_t fp_addr, uint32_t format_addr, uint32_t sp);
-int wrapper_printf(uint8_t *mem, uint32_t format_addr, uint32_t sp);
-int wrapper_sprintf(uint8_t *mem, uint32_t str_addr, uint32_t format_addr, uint32_t sp);
-int wrapper_fprintf(uint8_t *mem, uint32_t fp_addr, uint32_t format_addr, uint32_t sp);
+int wrapper_fscanf(uint8_t *mem, uint32_t fp_addr, uint32_t format_addr, struct Varargs *args);
+int wrapper_printf(uint8_t *mem, uint32_t format_addr, struct Varargs *args);
+int wrapper_sprintf(uint8_t *mem, uint32_t str_addr, uint32_t format_addr, struct Varargs *args);
+int wrapper_fprintf(uint8_t *mem, uint32_t fp_addr, uint32_t format_addr, struct Varargs *args);
 int wrapper__doprnt(uint8_t *mem, uint32_t format_addr, uint32_t params_addr, uint32_t fp_addr);
 void wrapper_free(uint8_t *mem, uint32_t data_addr);
 uint32_t wrapper_strlen(uint8_t *mem, uint32_t str_addr);
@@ -142,9 +149,9 @@ void wrapper_abort(uint8_t *mem);
 void wrapper_exit(uint8_t *mem, int status);
 void wrapper__exit(uint8_t *mem, int status);
 void wrapper__cleanup(uint8_t *mem);
-uint32_t wrapper__rld_new_interface(uint8_t *mem, uint32_t operation, uint32_t sp);
+uint32_t wrapper__rld_new_interface(uint8_t *mem, uint32_t operation, struct Varargs *args);
 void wrapper__exithandle(uint8_t *mem);
-int wrapper__prctl(uint8_t *mem, int operation, uint32_t sp);
+int wrapper__prctl(uint8_t *mem, int operation, struct Varargs *args);
 double wrapper__atod(uint8_t *mem, uint32_t buffer_addr, int ndigits, int dexp);
 int wrapper_pathconf(uint8_t *mem, uint32_t path_addr, int name);
 uint32_t wrapper_getenv(uint8_t *mem, uint32_t name_addr);
@@ -156,8 +163,8 @@ int wrapper_mprotect(uint8_t *mem, uint32_t addr, uint32_t length, int prot);
 int wrapper_sysconf(uint8_t *mem, int name);
 int wrapper_getpagesize(uint8_t *mem);
 int wrapper_strerror(uint8_t *mem, int errnum);
-int wrapper_ioctl(uint8_t *mem, int fd, uint32_t request, uint32_t sp);
-int wrapper_fcntl(uint8_t *mem, int fd, int cmd, uint32_t sp);
+int wrapper_ioctl(uint8_t *mem, int fd, uint32_t request, struct Varargs *args);
+int wrapper_fcntl(uint8_t *mem, int fd, int cmd, struct Varargs *args);
 uint32_t wrapper_signal(uint8_t *mem, int signum, fptr_trampoline trampoline, uint32_t handler_addr, uint32_t sp);
 uint32_t wrapper_sigset(uint8_t *mem, int signum, fptr_trampoline trampoline, uint32_t disp_addr, uint32_t sp);
 int wrapper_get_fpc_csr(uint8_t *mem);
@@ -171,7 +178,7 @@ int wrapper_mkstemp(uint8_t *mem, uint32_t name_addr);
 uint32_t wrapper_tmpfile(uint8_t *mem);
 int wrapper_wait(uint8_t *mem, uint32_t wstatus_addr);
 int wrapper_kill(uint8_t *mem, int pid, int sig);
-int wrapper_execlp(uint8_t *mem, uint32_t file_addr, uint32_t sp);
+int wrapper_execlp(uint8_t *mem, uint32_t file_addr, struct Varargs *args);
 int wrapper_execv(uint8_t *mem, uint32_t pathname_addr, uint32_t argv_addr);
 int wrapper_execvp(uint8_t *mem, uint32_t file_addr, uint32_t argv_addr);
 int wrapper_fork(uint8_t *mem);
@@ -179,8 +186,8 @@ int wrapper_system(uint8_t *mem, uint32_t command_addr);
 uint32_t wrapper_tsearch(uint8_t *mem, uint32_t key_addr, uint32_t rootp_addr, uint32_t compar_addr);
 uint32_t wrapper_tfind(uint8_t *mem, uint32_t key_addr, uint32_t rootp_addr, uint32_t compar_addr);
 uint32_t wrapper_qsort(uint8_t *mem, uint32_t base_addr, uint32_t num, uint32_t size, fptr_trampoline trampoline, uint32_t compare_addr, uint32_t sp);
-uint32_t wrapper_regcmp(uint8_t *mem, uint32_t string1_addr, uint32_t sp);
-uint32_t wrapper_regex(uint8_t *mem, uint32_t re_addr, uint32_t subject_addr, uint32_t sp);
+uint32_t wrapper_regcmp(uint8_t *mem, uint32_t string1_addr, struct Varargs *args);
+uint32_t wrapper_regex(uint8_t *mem, uint32_t re_addr, uint32_t subject_addr, struct Varargs *args);
 void wrapper___assert(uint8_t *mem, uint32_t assertion_addr, uint32_t file_addr, int line);
 void wrapper_twalk(uint8_t *mem, uint32_t root_addr, fptr_trampoline trampoline, uint32_t action_addr, uint32_t sp);
 int32_t wrapper_msync(uint8_t *mem, uint32_t addr_addr, uint32_t len, int32_t flags);
@@ -199,7 +206,7 @@ int32_t wrapper_connect(uint8_t *mem, int32_t sockfd, uint32_t addr_addr, uint32
 int32_t wrapper_recv(uint8_t *mem, int32_t sockfd, uint32_t buf_addr, uint32_t len, int32_t flags);
 int32_t wrapper_send(uint8_t *mem, int32_t sockfd, uint32_t buf_addr, uint32_t len, int32_t flags);
 int32_t wrapper_shutdown(uint8_t *mem, int32_t socket, int32_t how);
-int32_t wrapper_sscanf(uint8_t *mem, uint32_t str_addr, uint32_t format_addr, uint32_t sp);
+int32_t wrapper_sscanf(uint8_t *mem, uint32_t str_addr, uint32_t format_addr, struct Varargs *args);
 
 // C++ functions
 uint32_t wrapper___nw__FUi(uint8_t *mem, uint32_t size);

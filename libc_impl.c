@@ -122,6 +122,13 @@
 
 #define STDIO_BUFSIZE 16384
 
+#define POSIX_ARG_MAX 4096
+
+union host_doubleword {
+    uint64_t ww;
+    double d;
+};
+
 struct timespec_t_irix {
     int tv_sec;
     int tv_nsec;
@@ -292,6 +299,83 @@ void get_env_var(char* out, char* name) {
         fprintf(stderr, "Error: Environment variable %s is too large\n", name);
         exit(1);
     }
+}
+
+void init_args(struct Varargs* args, uint32_t params_addr) {
+#ifdef MIPS_ABI_N32
+    args->pos = 8;
+    args->stack_base = params_addr;
+#else /* MIPS_ABI_O32 */
+    args->pos = 4;
+    args->stack_base = params_addr;
+    if (args->stack_base & 0x3) {
+        args->stack_base += 1;
+    }
+#endif
+}
+
+int get_int_arg(uint8_t* mem, struct Varargs* args) {
+    int val;
+#ifdef MIPS_ABI_N32
+    if (args->pos < 8) {
+        val = (int32_t)args->regs[args->pos];
+    } else {
+        val = MEM_S32(args->stack_base + (args->pos - 8) * 8 + 4);
+    }
+#else /* MIPS_ABI_O32 */
+    if (args->pos < 4) {
+        val = (int32_t)args->regs[args->pos];
+    } else {
+        val = MEM_S32(args->stack_base + (args->pos - 4) * 4);
+    }
+#endif
+    args->pos++;
+    return val;
+}
+
+unsigned int get_unsigned_int_arg(uint8_t* mem, struct Varargs* args) {
+    unsigned int val;
+#ifdef MIPS_ABI_N32
+    if (args->pos < 8) {
+        val = (uint32_t)args->regs[args->pos];
+    } else {
+        val = MEM_U32(args->stack_base + (args->pos - 8) * 8 + 4);
+    }
+#else /* MIPS_ABI_O32 */
+    if (args->pos < 4) {
+        val = (uint32_t)args->regs[args->pos];
+    } else {
+        val = MEM_U32(args->stack_base + (args->pos - 4) * 4);
+    }
+#endif
+    args->pos++;
+    return val;
+}
+
+double get_double_arg(uint8_t* mem, struct Varargs* args) {
+    union host_doubleword val;
+#ifdef MIPS_ABI_N32
+    if (args->pos < 8) {
+        val.ww = args->regs[args->pos];
+    } else {
+        val.ww = ((uint64_t)MEM_U32(args->stack_base + (args->pos - 8) * 4) << 32) |
+                  MEM_U32(args->stack_base + (args->pos - 8 + 1) * 4);
+    }
+    args->pos++;
+#else /* MIPS_ABI_O32 */
+    if (args->pos % 2 != 0) {
+        args->pos++;
+    }
+    if (args->pos < 4) {
+        val.ww = ((uint64_t)args->regs[args->pos] << 32) |
+                    (uint32_t)args->regs[args->pos + 1];
+    } else {
+        val.ww = ((uint64_t)MEM_U32(args->stack_base + (args->pos - 4) * 4) << 32) |
+                  MEM_U32(args->stack_base + (args->pos - 4 + 1) * 4);
+    }
+    args->pos += 2;
+#endif
+    return val.d;
 }
 
 static void init_usr_lib_redirect(void) {
@@ -669,7 +753,7 @@ void wrapper_free(uint8_t* mem, uint32_t data_addr) {
     mem_used -= size;
 }
 
-int wrapper_fscanf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, uint32_t sp) {
+int wrapper_fscanf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, struct Varargs* args) {
     UNUSED struct FILE_irix* f = (struct FILE_irix*)&MEM_U32(fp_addr);
     STRING(format)
     (void)format;
@@ -677,7 +761,6 @@ int wrapper_fscanf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, uint32_
     int ret = 0;
     char c;
     int ch;
-    sp += 2 * 4;
     for (;;) {
         c = MEM_S8(format_addr);
         ++format_addr;
@@ -731,8 +814,7 @@ int wrapper_fscanf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, uint32_
                         }
                     }
                     if (found_first) {
-                        uint32_t int_addr = MEM_U32(sp);
-                        sp += 4;
+                        uint32_t int_addr = get_unsigned_int_arg(mem, args);
                         MEM_S32(int_addr) = (int)(num * sign);
                         ++ret;
                     } else {
@@ -778,24 +860,20 @@ int prout_mem(uint8_t* mem, uint32_t* dest_addr, uint32_t in_addr, uint32_t coun
 /**
  * Get the arguments corresponding to the minwidth and precision ("*", ".*" or "*.*")
  */
-static uint32_t get_asterisk_args(uint8_t* mem, int count, int args[2], uint32_t sp) {
+static void get_asterisk_args(uint8_t* mem, int count, int ast_args[2], struct Varargs* args) {
     switch (count) {
         case 1:
-            args[0] = MEM_U32(sp);
-            sp += 4;
+            ast_args[0] = get_int_arg(mem, args);
             break;
 
         case 2:
-            args[0] = MEM_U32(sp);
-            sp += 4;
-            args[1] = MEM_U32(sp);
-            sp += 4;
+            ast_args[0] = get_int_arg(mem, args);
+            ast_args[1] = get_int_arg(mem, args);
             break;
 
         default:
             break;
     }
-    return sp;
 }
 
 // Macro is the only way to pass `data` into sprintf since it can vary in type.
@@ -815,11 +893,10 @@ static uint32_t get_asterisk_args(uint8_t* mem, int count, int args[2], uint32_t
 /**
  * printf internal that takes `mem` as input.
  */
-int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr, uint32_t sp) {
+int _mprintf(prout prout_func, uint8_t* mem, uint32_t out, uint32_t format_addr, struct Varargs* args) {
     STRING(format)
 
     int ret = 0;
-    uint32_t sp_incr = 4;
     size_t buf_len = 0x1000;
     char* buf = malloc(buf_len);
     size_t str_len = 0x1000;
@@ -839,7 +916,7 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
             c = MEM_U8(pos);
         }
         if (format_addr != pos) {
-            if (prout_func(mem, out, format_addr, pos - format_addr) != (int)(pos - format_addr)) {
+            if (prout_func(mem, &out, format_addr, pos - format_addr) != (int)(pos - format_addr)) {
                 return -1;
             }
         }
@@ -901,12 +978,16 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
             case 'c':
             case 'd':
             case 'i':
+                get_asterisk_args(mem, asterisk_count, ast_args, args);
+                ASTERISK_PRINTF(step_chars_printed, buf, format_specifier, asterisk_count, ast_args, get_int_arg(mem, args));
+                break;
+
             case 'o':
             case 'X':
             case 'x':
             case 'u':
-                sp = get_asterisk_args(mem, asterisk_count, ast_args, sp);
-                ASTERISK_PRINTF(step_chars_printed, buf, format_specifier, asterisk_count, ast_args, MEM_U32(sp));
+                get_asterisk_args(mem, asterisk_count, ast_args, args);
+                ASTERISK_PRINTF(step_chars_printed, buf, format_specifier, asterisk_count, ast_args, get_unsigned_int_arg(mem, args));
                 break;
 
             case 'F':
@@ -915,37 +996,29 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
             case 'g':
             case 'E':
             case 'e':
-                sp = get_asterisk_args(mem, asterisk_count, ast_args, sp);
-
-                // align to position of float promoted to double
-                if ((sp % 8) != 0) {
-                    sp += 4;
-                }
-
-                ASTERISK_PRINTF(step_chars_printed, buf, format_specifier, asterisk_count, ast_args, MEM_F64(sp));
-
-                // Increment an extra time to leap over the second half of the double
-                sp += sp_incr;
+                get_asterisk_args(mem, asterisk_count, ast_args, args);
+                ASTERISK_PRINTF(step_chars_printed, buf, format_specifier, asterisk_count, ast_args, get_double_arg(mem, args));
                 break;
 
             case 's':
                 // Special handling for most common case
                 if (strcmp(format_specifier, "%s") == 0) {
-                    uint32_t str_addr = MEM_U32(sp);
+                    uint32_t str_addr = get_unsigned_int_arg(mem, args);
                     size_t len = wrapper_strlen(mem, str_addr);
-                    step_chars_printed = prout_func(mem, out, str_addr, len);
+                    step_chars_printed = prout_func(mem, &out, str_addr, len);
                     goto increments;
                 }
 
-                sp = get_asterisk_args(mem, asterisk_count, ast_args, sp);
+                get_asterisk_args(mem, asterisk_count, ast_args, args);
+                uint32_t str_addr = get_unsigned_int_arg(mem, args);
 
                 // Copy string into normal memory to be able to pass it to normal printf functions
-                step_chars_printed = wrapper_strlen(mem, MEM_U32(sp));
+                step_chars_printed = wrapper_strlen(mem, str_addr);
                 if (step_chars_printed + 1 > (int)str_len) {
                     str_len = step_chars_printed + 1;
                     str = realloc(str, str_len);
                 }
-                strcpy_mem2str(mem, str, MEM_U32(sp));
+                strcpy_mem2str(mem, str, str_addr);
 
                 // Work out the actual length to print
                 switch (asterisk_count) {
@@ -981,7 +1054,7 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
 
             memcpy_str2mem(mem, INTBUF_ADDR, buf + chars_printed, in_count);
 
-            int out_count = prout_func(mem, out, INTBUF_ADDR, in_count);
+            int out_count = prout_func(mem, &out, INTBUF_ADDR, in_count);
             if (out_count != in_count) {
                 fprintf(stderr, "Did not print %s successfully\n", format);
                 return ret;
@@ -990,7 +1063,6 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
         }
 
     increments:
-        sp += sp_incr;
         ret += step_chars_printed;
         pos++;
         format_addr = pos;
@@ -1001,26 +1073,22 @@ int _mprintf(prout prout_func, uint8_t* mem, uint32_t* out, uint32_t format_addr
     return ret;
 }
 
-int wrapper_fprintf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, uint32_t sp) {
-    sp += 8;
-    return _mprintf(prout_file, mem, &fp_addr, format_addr, sp);
+int wrapper_fprintf(uint8_t* mem, uint32_t fp_addr, uint32_t format_addr, struct Varargs* args) {
+    return _mprintf(prout_file, mem, fp_addr, format_addr, args);
 }
 
-int wrapper_printf(uint8_t* mem, uint32_t format_addr, uint32_t sp) {
-    uint32_t fp_addr = STDOUT_ADDR;
-
-    sp += 4;
-    return _mprintf(prout_file, mem, &fp_addr, format_addr, sp);
+int wrapper_printf(uint8_t* mem, uint32_t format_addr, struct Varargs* args) {
+    return _mprintf(prout_file, mem, STDOUT_ADDR, format_addr, args);
 }
 
-int wrapper_sprintf(uint8_t* mem, uint32_t str_addr, uint32_t format_addr, uint32_t sp) {
-    sp += 8;
-    return _mprintf(prout_mem, mem, &str_addr, format_addr, sp);
+int wrapper_sprintf(uint8_t* mem, uint32_t str_addr, uint32_t format_addr, struct Varargs* args) {
+    return _mprintf(prout_mem, mem, str_addr, format_addr, args);
 }
 
 int wrapper__doprnt(uint8_t* mem, uint32_t format_addr, uint32_t params_addr, uint32_t fp_addr) {
-    assert(0 && "_doprnt not implemented");
-    return 0;
+    struct Varargs args;
+    init_args(&args, params_addr);
+    return _mprintf(prout_file, mem, fp_addr, format_addr, &args);
 }
 
 uint32_t wrapper_strlen(uint8_t* mem, uint32_t str_addr) {
@@ -2445,7 +2513,7 @@ void wrapper__exit(uint8_t* mem, int status) {
 void wrapper__cleanup(uint8_t* mem) {
 }
 
-uint32_t wrapper__rld_new_interface(uint8_t* mem, uint32_t operation, uint32_t sp) {
+uint32_t wrapper__rld_new_interface(uint8_t* mem, uint32_t operation, struct Varargs* args) {
     assert(0 && "_rld_new_interface not implemented");
     return 0;
 }
@@ -2454,7 +2522,7 @@ void wrapper__exithandle(uint8_t* mem) {
     assert(0 && "_exithandle not implemented");
 }
 
-int wrapper__prctl(uint8_t* mem, int operation, uint32_t sp) {
+int wrapper__prctl(uint8_t* mem, int operation, struct Varargs* args) {
     assert(0 && "_prctl not implemented");
     return 0;
 }
@@ -2549,12 +2617,12 @@ int wrapper_strerror(uint8_t* mem, int errnum) {
     return 0;
 }
 
-int wrapper_ioctl(uint8_t* mem, int fd, uint32_t request, uint32_t sp) {
+int wrapper_ioctl(uint8_t* mem, int fd, uint32_t request, struct Varargs* args) {
     assert(0 && "ioctl not implemented");
     return 0;
 }
 
-int wrapper_fcntl(uint8_t* mem, int fd, int cmd, uint32_t sp) {
+int wrapper_fcntl(uint8_t* mem, int fd, int cmd, struct Varargs* args) {
     assert(0 && "fcntl not implemented");
     return 0;
 }
@@ -2717,9 +2785,35 @@ int wrapper_kill(uint8_t* mem, int pid, int sig) {
     return ret;
 }
 
-int wrapper_execlp(uint8_t* mem, uint32_t file_addr, uint32_t sp) {
-    uint32_t argv_addr = sp + 4;
-    return wrapper_execvp(mem, file_addr, argv_addr);
+int wrapper_execlp(uint8_t* mem, uint32_t file_addr, struct Varargs* args) {
+    STRING(file)
+    uint32_t argc = 0;
+    char* argv[POSIX_ARG_MAX];
+    while (true) {
+        uint32_t str_addr = get_unsigned_int_arg(mem, args);
+        if (str_addr == 0) {
+            break;
+        }
+        uint32_t len = wrapper_strlen(mem, str_addr) + 1;
+        char* str = malloc(len);
+        argv[argc++] = str;
+        while (len--) {
+            *str++ = MEM_S8(str_addr);
+            ++str_addr;
+        }
+    }
+    argv[argc] = NULL;
+
+    char rfile[PATH_MAX + 1];
+    redirect_path(rfile, file, "/usr/lib", usr_lib_redirect);
+
+    execvp(rfile, argv);
+
+    MEM_U32(ERRNO_ADDR) = errno;
+    for (uint32_t i = 0; i < argc; i++) {
+        free(argv[i]);
+    }
+    return -1;
 }
 
 int wrapper_execv(uint8_t* mem, uint32_t pathname_addr, uint32_t argv_addr) {
@@ -3021,14 +3115,14 @@ static void qst(uint8_t* mem, uint32_t start, uint32_t end, fptr_trampoline tram
 
 #undef CMP
 
-uint32_t wrapper_regcmp(uint8_t* mem, uint32_t string1_addr, uint32_t sp) {
+uint32_t wrapper_regcmp(uint8_t* mem, uint32_t string1_addr, struct Varargs* args) {
     STRING(string1);
     fprintf(stderr, "regex string: %s\n", string1);
     assert(0 && "regcmp not implemented");
     return 0;
 }
 
-uint32_t wrapper_regex(uint8_t* mem, uint32_t re_addr, uint32_t subject_addr, uint32_t sp) {
+uint32_t wrapper_regex(uint8_t* mem, uint32_t re_addr, uint32_t subject_addr, struct Varargs* args) {
     STRING(subject);
     (void)subject;
     assert(0 && "regex not implemented");
@@ -3209,7 +3303,7 @@ int32_t wrapper_shutdown(uint8_t* mem, int32_t socket, int32_t how) {
 }
 
 // https://linux.die.net/man/3/sscanf
-int32_t wrapper_sscanf(uint8_t* mem, uint32_t str_addr, uint32_t format_addr, uint32_t sp) {
+int32_t wrapper_sscanf(uint8_t* mem, uint32_t str_addr, uint32_t format_addr, struct Varargs* args) {
     assert(0 && "sscanf not implemented");
 }
 
@@ -3221,11 +3315,6 @@ uint32_t wrapper___nw__FUi(uint8_t* mem, uint32_t size) {
 void wrapper___dl__FPv(uint8_t* mem, uint32_t data_addr) {
     wrapper_free(mem, data_addr);
 }
-
-union host_doubleword {
-    uint64_t ww;
-    double d;
-};
 
 union FloatReg FloatReg_from_double(double d) {
     union host_doubleword val;
