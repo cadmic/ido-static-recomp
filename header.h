@@ -52,3 +52,4 @@ static union FloatReg
     f30 = {{0, 0}},
     f31 = {{0, 0}};
 static uint32_t fcsr = 1;
+static struct Varargs varargs;
