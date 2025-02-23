@@ -64,6 +64,7 @@ uint32_t wrapper_strcspn(uint8_t *mem, uint32_t str_addr, uint32_t invalid_addr)
 uint32_t wrapper_strpbrk(uint8_t *mem, uint32_t str_addr, uint32_t accept_addr);
 int wrapper_fstat(uint8_t *mem, int fildes, uint32_t buf_addr);
 int wrapper_stat(uint8_t *mem, uint32_t pathname_addr, uint32_t buf_addr);
+int wrapper_fstatvfs(uint8_t *mem, int fildes, uint32_t buf_addr);
 int wrapper_ftruncate(uint8_t *mem, int fd, int length);
 int wrapper_truncate(uint8_t *mem, uint32_t pathname_addr, int length);
 void wrapper_bcopy(uint8_t *mem, uint32_t src_addr, uint32_t dst_addr, uint32_t len);
@@ -76,6 +77,7 @@ uint32_t wrapper_freopen(uint8_t *mem, uint32_t path_addr, uint32_t mode_addr, u
 int wrapper_fclose(uint8_t *mem, uint32_t fp_addr);
 int wrapper_fflush(uint8_t *mem, uint32_t fp_addr);
 int wrapper_fchown(uint8_t *mem, int fd, int owner, int group);
+int wrapper_fchmod(uint8_t *mem, int fd, int mode);
 int wrapper_ftell(uint8_t *mem, uint32_t fp_addr);
 void wrapper_rewind(uint8_t *mem, uint32_t fp_addr);
 int wrapper_fseek(uint8_t *mem, uint32_t fp_addr, int offset, int origin);
@@ -122,6 +124,7 @@ int wrapper_ungetc(uint8_t *mem, int ch, uint32_t fp_addr);
 uint32_t wrapper_gets(uint8_t *mem, uint32_t str_addr);
 uint32_t wrapper_fread(uint8_t *mem, uint32_t data_addr, uint32_t size, uint32_t count, uint32_t fp_addr);
 uint32_t wrapper_fwrite(uint8_t *mem, uint32_t data_addr, uint32_t size, uint32_t count, uint32_t fp_addr);
+int wrapper_fputc(uint8_t *mem, int character, uint32_t fp_addr);
 int wrapper_fputs(uint8_t *mem, uint32_t str_addr, uint32_t fp_addr);
 int wrapper_puts(uint8_t *mem, uint32_t str_addr);
 uint32_t wrapper_getcwd(uint8_t *mem, uint32_t buf_addr, uint32_t size);
@@ -177,6 +180,7 @@ uint32_t wrapper_mktemp(uint8_t *mem, uint32_t template_addr);
 int wrapper_mkstemp(uint8_t *mem, uint32_t name_addr);
 uint32_t wrapper_tmpfile(uint8_t *mem);
 int wrapper_wait(uint8_t *mem, uint32_t wstatus_addr);
+int wrapper_waitpid(uint8_t *mem, int pid, uint32_t wstatus_addr, int options);
 int wrapper_kill(uint8_t *mem, int pid, int sig);
 int wrapper_execlp(uint8_t *mem, uint32_t file_addr, struct Varargs *args);
 int wrapper_execv(uint8_t *mem, uint32_t pathname_addr, uint32_t argv_addr);
@@ -192,9 +196,10 @@ void wrapper___assert(uint8_t *mem, uint32_t assertion_addr, uint32_t file_addr,
 void wrapper_twalk(uint8_t *mem, uint32_t root_addr, fptr_trampoline trampoline, uint32_t action_addr, uint32_t sp);
 int32_t wrapper_msync(uint8_t *mem, uint32_t addr_addr, uint32_t len, int32_t flags);
 int32_t wrapper_mkdir(uint8_t *mem, uint32_t path_addr, uint32_t mode);
-int32_t wrapper_fputc(uint8_t *mem, int32_t ch, uint32_t stream_addr);
+int wrapper_rmdir(uint8_t *mem, uint32_t pathname_addr);
 int32_t wrapper_getopt(uint8_t *mem, int32_t argc, uint32_t argv_addr, uint32_t optstring_addr);
 int32_t wrapper_link(uint8_t *mem, uint32_t oldpath_addr, uint32_t newpath_addr);
+int wrapper_symlink(uint8_t *mem, uint32_t oldpath_addr, uint32_t newpath_addr);
 int32_t wrapper_vsprintf(uint8_t *mem, uint32_t buffer_addr, uint32_t format_addr, uint32_t vlist_addr);
 double wrapper_fabs(double x);
 int32_t wrapper_sysid(uint8_t *mem, uint32_t unknown_parameter_addr);
@@ -207,6 +212,21 @@ int32_t wrapper_recv(uint8_t *mem, int32_t sockfd, uint32_t buf_addr, uint32_t l
 int32_t wrapper_send(uint8_t *mem, int32_t sockfd, uint32_t buf_addr, uint32_t len, int32_t flags);
 int32_t wrapper_shutdown(uint8_t *mem, int32_t socket, int32_t how);
 int32_t wrapper_sscanf(uint8_t *mem, uint32_t str_addr, uint32_t format_addr, struct Varargs *args);
+int wrapper_getrlimit(uint8_t *mem, int resource, uint32_t buf_addr);
+int wrapper_setrlimit(uint8_t *mem, int resource, uint32_t buf_addr);
+int wrapper_getrusage(uint8_t *mem, int who, uint32_t buf_addr);
+int wrapper_BSDopendir(uint8_t *mem, uint32_t dirname_addr);
+int wrapper_BSDclosedir(uint8_t *mem, int dirp);
+int wrapper_BSDreaddir(uint8_t *mem, int dirp);
+int wrapper_pcreateve(uint8_t *mem, uint32_t path_addr, uint32_t argv_addr, uint32_t envp_addr);
+uint32_t wrapper_sgidladd(uint8_t *mem, int path, int mode);
+uint32_t wrapper_dlerror(uint8_t *mem);
+void wrapper_ipa_add_comma_list(uint8_t *mem);
+void wrapper_ipa_add_link_flag(uint8_t *mem);
+void wrapper_ipa_compose_comma_list(uint8_t *mem);
+void wrapper_ipa_driver(uint8_t *mem);
+void wrapper_ipa_init_link_line(uint8_t *mem);
+void wrapper_process_whirl32(uint8_t *mem);
 
 // C++ functions
 uint32_t wrapper___nw__FUi(uint8_t *mem, uint32_t size);

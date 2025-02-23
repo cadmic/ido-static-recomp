@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/times.h>
 #include <sys/file.h>
 #include <sys/wait.h>
@@ -68,6 +69,17 @@
 
 #ifdef IDO71
 // IDO 7.1
+#ifdef MIPS_ABI_N32
+#define IOB_ADDR 0x0fb4b0e0
+#define ERRNO_ADDR 0x0fb4bb40
+#define CTYPE_ADDR 0x0fb493e8
+#define LIBC_ADDR 0x0fb49000
+#define OPTERR_ADDR 0x0fb54b30
+#define OPTIND_ADDR 0x0fb54b34
+#define OPTOPT_ADDR 0x0fb59830
+#define OPTARG_ADDR 0x0fb59834
+#define LIBC_SIZE 0x3000
+#else /* MIPS_ABI_O32 */
 #define IOB_ADDR 0x0fb4ee44
 #define ERRNO_ADDR 0x0fb4ec80
 #define CTYPE_ADDR 0x0fb4cba0
@@ -77,6 +89,7 @@
 #define OPTIND_ADDR 0x0fb436a4
 #define OPTOPT_ADDR 0x0fb436a8
 #define OPTARG_ADDR 0x0fb436ac
+#endif
 #endif
 
 #ifdef IDO72
@@ -129,6 +142,11 @@ union host_doubleword {
     double d;
 };
 
+struct uint64_t_irix {
+    uint32_t hi;
+    uint32_t lo;
+} __attribute__((aligned(8)));
+
 struct timespec_t_irix {
     int tv_sec;
     int tv_nsec;
@@ -138,9 +156,15 @@ struct FILE_irix {
     int _cnt;
     uint32_t _ptr_addr;
     uint32_t _base_addr;
+#ifdef MIPS_ABI_N32
     uint8_t pad[2];
     uint8_t _file;
     uint8_t _flag;
+#else /* MIPS_ABI_O32 */
+    uint16_t _file;
+    uint8_t _o_file;
+    uint8_t _flag;
+#endif
 };
 
 static struct {
@@ -208,6 +232,15 @@ static char usr_lib_redirect[PATH_MAX + 1];
 static char usr_include_redirect[PATH_MAX + 1];
 
 static int g_file_max = 3;
+
+struct mmapped_file {
+    uint8_t* ptr;
+    uint32_t addr;
+    uint32_t length;
+};
+
+static struct mmapped_file mmapped_files[NFILE];
+static int num_mmapped_files = 0;
 
 /* Compilation Target/Emulation Host Page Size Determination */
 #if defined(__CYGWIN__) || (defined(__linux__) && defined(__aarch64__))
@@ -284,6 +317,18 @@ static void free_all_file_bufs(uint8_t* mem) {
         if (f[i]._flag & IOMYBUF) {
             wrapper_free(mem, f[i]._base_addr);
         }
+    }
+}
+
+static void write_back_mmapped_files(uint8_t* mem) {
+    for (int i = 0; i < num_mmapped_files; i++) {
+        uint8_t* ptr = mmapped_files[i].ptr;
+        uint32_t addr = mmapped_files[i].addr;
+        uint32_t length = mmapped_files[i].length;
+        for (uint32_t j = 0; j < length; j++) {
+            ptr[j] = MEM_S8(addr + j);
+        }
+        munmap(ptr, length);
     }
 }
 
@@ -512,6 +557,7 @@ static void free_argv(int argc, char** argv) {
 void final_cleanup(uint8_t* mem) {
     wrapper_fflush(mem, 0);
     free_all_file_bufs(mem);
+    write_back_mmapped_files(mem);
     mem += MEM_REGION_START;
     memory_unmap(mem, MEM_REGION_SIZE);
     destroy_global_args();
@@ -602,6 +648,10 @@ static char* strcpy_mem2str(uint8_t* mem, char* dest, uint32_t src_addr) {
             return dest - 1;
         }
     }
+}
+
+struct uint64_t_irix convert_uint64_t(uint64_t val) {
+    return (struct uint64_t_irix){val >> 32, val};
 }
 
 uint32_t wrapper_sbrk(uint8_t* mem, int increment) {
@@ -1367,17 +1417,25 @@ uint32_t wrapper_strpbrk(uint8_t* mem, uint32_t str_addr, uint32_t accept_addr) 
 }
 
 static void stat_common(uint8_t* mem, uint32_t buf_addr, struct stat* statbuf) {
-    struct irix_stat {
+    struct stat_irix {
         int st_dev;
         int pad1[3];
+#ifdef MIPS_ABI_N32
+        struct uint64_t_irix st_ino;
+#else
         int st_ino;
+#endif
         int st_mode;
         int st_nlink;
         int st_uid;
         int st_gid;
         int st_rdev;
         int pad2[2];
+#ifdef MIPS_ABI_N32
+        struct uint64_t_irix st_size;
+#else
         int st_size;
+#endif
         int pad3;
         struct timespec_t_irix st_atim;
         struct timespec_t_irix st_mtim;
@@ -1386,13 +1444,18 @@ static void stat_common(uint8_t* mem, uint32_t buf_addr, struct stat* statbuf) {
         int st_blocks;
     } s;
     s.st_dev = statbuf->st_dev;
-    s.st_ino = statbuf->st_ino;
     s.st_mode = statbuf->st_mode;
     s.st_nlink = statbuf->st_nlink;
     s.st_uid = statbuf->st_uid;
     s.st_gid = statbuf->st_gid;
     s.st_rdev = statbuf->st_rdev;
+#ifdef MIPS_ABI_N32
+    s.st_ino = convert_uint64_t(statbuf->st_ino);
+    s.st_size = convert_uint64_t(statbuf->st_size);
+#else
+    s.st_ino = statbuf->st_ino;
     s.st_size = statbuf->st_size;
+#endif
 #ifdef __APPLE__
     s.st_atim.tv_sec = statbuf->st_atimespec.tv_sec;
     s.st_atim.tv_nsec = statbuf->st_atimespec.tv_nsec;
@@ -1430,6 +1493,67 @@ int wrapper_stat(uint8_t* mem, uint32_t pathname_addr, uint32_t buf_addr) {
         return -1;
     } else {
         stat_common(mem, buf_addr, &statbuf);
+        return 0;
+    }
+}
+
+static void statvfs_common(uint8_t* mem, uint32_t buf_addr, struct statvfs* statbuf) {
+    struct statvfs_irix {
+        int f_bsize;
+        int f_frsize;
+#ifdef MIPS_ABI_N32
+        struct uint64_t_irix f_blocks;
+        struct uint64_t_irix f_bfree;
+        struct uint64_t_irix f_bavail;
+        struct uint64_t_irix f_files;
+        struct uint64_t_irix f_ffree;
+        struct uint64_t_irix f_favail;
+#else /* MIPS_ABI_O32 */
+        int f_blocks;
+        int f_bfree;
+        int f_bavail;
+        int f_files;
+        int f_ffree;
+        int f_favail;
+#endif
+        int f_fsid;
+        char f_basetype[16];
+        int f_flag;
+        int f_namemax;
+        char f_fstr[32];
+        int f_filler[16];
+    } s;
+    memset(&s, 0, sizeof(s));
+    s.f_bsize = statbuf->f_bsize;
+    s.f_frsize = statbuf->f_frsize;
+#ifdef MIPS_ABI_N32
+    s.f_blocks = convert_uint64_t(statbuf->f_blocks);
+    s.f_bfree = convert_uint64_t(statbuf->f_bfree);
+    s.f_bavail = convert_uint64_t(statbuf->f_bavail);
+    s.f_files = convert_uint64_t(statbuf->f_files);
+    s.f_ffree = convert_uint64_t(statbuf->f_ffree);
+    s.f_favail = convert_uint64_t(statbuf->f_favail);
+#else
+    s.f_blocks = statbuf->f_blocks;
+    s.f_bfree = statbuf->f_bfree;
+    s.f_bavail = statbuf->f_bavail;
+    s.f_files = statbuf->f_files;
+    s.f_ffree = statbuf->f_ffree;
+    s.f_favail = statbuf->f_favail;
+#endif
+    s.f_fsid = statbuf->f_fsid;
+    s.f_flag = statbuf->f_flag;
+    s.f_namemax = statbuf->f_namemax;
+    memcpy(&MEM_U32(buf_addr), &s, sizeof(s));
+}
+
+int wrapper_fstatvfs(uint8_t* mem, int fildes, uint32_t buf_addr) {
+    struct statvfs statbuf;
+    if (fstatvfs(fildes, &statbuf) < 0) {
+        MEM_U32(ERRNO_ADDR) = errno;
+        return -1;
+    } else {
+        statvfs_common(mem, buf_addr, &statbuf);
         return 0;
     }
 }
@@ -1652,6 +1776,14 @@ int wrapper_fflush(uint8_t* mem, uint32_t fp_addr) {
 
 int wrapper_fchown(uint8_t* mem, int fd, int owner, int group) {
     int ret = fchown(fd, owner, group);
+    if (ret != 0) {
+        MEM_U32(ERRNO_ADDR) = errno;
+    }
+    return ret;
+}
+
+int wrapper_fchmod(uint8_t* mem, int fd, int mode) {
+    int ret = fchmod(fd, mode);
     if (ret != 0) {
         MEM_U32(ERRNO_ADDR) = errno;
     }
@@ -2344,6 +2476,27 @@ uint32_t wrapper_fwrite(uint8_t* mem, uint32_t data_addr, uint32_t size, uint32_
     return num_written;
 }
 
+int wrapper_fputc(uint8_t* mem, int character, uint32_t fp_addr) {
+    struct FILE_irix* f = (struct FILE_irix*)&MEM_U32(fp_addr);
+    if (f->_base_addr == 0) {
+        file_assign_buffer(mem, f);
+        f->_cnt = bufendtab[f - (struct FILE_irix*)&MEM_U32(IOB_ADDR)];
+        f->_flag |= IOWRT;
+    }
+    if (f->_cnt == 0) {
+        if (wrapper_fflush(mem, fp_addr) != 0) {
+            return -1;
+        }
+    }
+    MEM_U8(f->_ptr_addr) = (uint8_t)character;
+    f->_ptr_addr += 1;
+    f->_cnt -= 1;
+    if (f->_flag & IONBF) {
+        wrapper_fflush(mem, fp_addr); // TODO check error return value
+    }
+    return character;
+}
+
 int wrapper_fputs(uint8_t* mem, uint32_t str_addr, uint32_t fp_addr) {
     assert(str_addr != 0);
 
@@ -2573,23 +2726,62 @@ uint32_t wrapper_setlocale(uint8_t* mem, int category, uint32_t locale_addr) {
     return 0;
 }
 
+#define IRIX_MAP_SHARED     0x001
+#define IRIX_MAP_PRIVATE    0x002
+
+#define IRIX_MAP_FIXED      0x010
+#define IRIX_MAP_RENAME     0x020
+#define IRIX_MAP_AUTOGROW   0x040
+#define IRIX_MAP_LOCAL      0x080
+#define IRIX_MAP_AUTORESRV  0x100
+
 uint32_t wrapper_mmap(uint8_t* mem, uint32_t addr, uint32_t length, int prot, int flags, int fd, int offset) {
-    if (addr == 0 && prot == (prot & 3) && flags == 2) {
-        // Read/write, map private. Just make a copy.
-        uint8_t* ptr = mmap(0, length, PROT_READ, MAP_PRIVATE, fd, offset);
-        if (ptr == MAP_FAILED) {
+    if (flags & (IRIX_MAP_FIXED | IRIX_MAP_RENAME | IRIX_MAP_LOCAL | IRIX_MAP_AUTORESRV)) {
+        assert(0 && "mmap flags not implemented");
+    }
+
+    if (flags & IRIX_MAP_AUTOGROW) {
+        // Resize file if necessary
+        struct stat st;
+        if (fstat(fd, &st) != 0) {
             MEM_U32(ERRNO_ADDR) = errno;
             return -1;
         }
-        uint32_t out = wrapper_malloc(mem, length);
-        for (uint32_t i = 0; i < length; i++) {
-            MEM_S8(out + i) = ptr[i];
+        if (st.st_size < offset + length) {
+            if (ftruncate(fd, offset + length) != 0) {
+                MEM_U32(ERRNO_ADDR) = errno;
+                return -1;
+            }
         }
-        munmap(ptr, length);
-        return out;
     }
-    assert(0 && "mmap not implemented");
-    return 0;
+
+    // Copy the file contents into memory
+    uint8_t* ptr;
+    if (flags & IRIX_MAP_SHARED) {
+        ptr = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+    } else {
+        ptr = mmap(0, length, PROT_READ, MAP_PRIVATE, fd, offset);
+    }
+    if (ptr == MAP_FAILED) {
+        MEM_U32(ERRNO_ADDR) = errno;
+        return -1;
+    }
+    addr = wrapper_malloc(mem, length);
+    for (uint32_t i = 0; i < length; i++) {
+        MEM_S8(addr + i) = ptr[i];
+    }
+
+    if (flags & IRIX_MAP_SHARED) {
+        // Copy back the file when program exits
+        int i = num_mmapped_files++;
+        mmapped_files[i].ptr = ptr;
+        mmapped_files[i].addr = addr;
+        mmapped_files[i].length = length;
+    } else {
+        munmap(ptr, length);
+    }
+
+    return addr;
 }
 
 int wrapper_munmap(uint8_t* mem, uint32_t addr, uint32_t length) {
@@ -2773,6 +2965,13 @@ uint32_t wrapper_tmpfile(uint8_t* mem) {
 int wrapper_wait(uint8_t* mem, uint32_t wstatus_addr) {
     int wstatus;
     pid_t ret = wait(&wstatus);
+    MEM_S32(wstatus_addr) = wstatus;
+    return ret;
+}
+
+int wrapper_waitpid(uint8_t* mem, int pid, uint32_t wstatus_addr, int options) {
+    int wstatus;
+    int ret = waitpid(pid, &wstatus, options);
     MEM_S32(wstatus_addr) = wstatus;
     return ret;
 }
@@ -3150,21 +3349,10 @@ int32_t wrapper_mkdir(uint8_t* mem, uint32_t path_addr, uint32_t mode) {
     assert(0 && "mkdir not implemented");
 }
 
-// https://en.cppreference.com/w/c/io/fputc
-int32_t wrapper_fputc(uint8_t* mem, int32_t ch, uint32_t stream_addr) {
-    int32_t ret;
-
-    if (stream_addr == STDOUT_ADDR) {
-        ret = fputc(ch, stdout);
-    } else if (stream_addr == STDERR_ADDR) {
-        ret = fputc(ch, stderr);
-    } else {
-        fprintf(stderr, "%s: ch          %i\n", __func__, ch);
-        fprintf(stderr, "%s: stream_addr %X\n", __func__, stream_addr);
-        assert(0 && "fputc with custom stream is not implemented");
-    }
-
-    return ret;
+// https://linux.die.net/man/3/rmdir
+int wrapper_rmdir(uint8_t *mem, uint32_t pathname_addr) {
+    assert(0 && "rmdir not implemented");
+    return 0;
 }
 
 // https://linux.die.net/man/3/getopt
@@ -3247,6 +3435,12 @@ int32_t wrapper_link(uint8_t* mem, uint32_t oldpath_addr, uint32_t newpath_addr)
     assert(0 && "link not implemented");
 }
 
+// https://linux.die.net/man/2/symlink
+int wrapper_symlink(uint8_t *mem, uint32_t oldpath_addr, uint32_t newpath_addr) {
+    assert(0 && "symlink not implemented");
+    return 0;
+}
+
 // https://en.cppreference.com/w/c/io/vfprintf
 int32_t wrapper_vsprintf(uint8_t* mem, uint32_t buffer_addr, uint32_t format_addr, uint32_t vlist_addr) {
     assert(0 && "vsprintf not implemented");
@@ -3305,6 +3499,75 @@ int32_t wrapper_shutdown(uint8_t* mem, int32_t socket, int32_t how) {
 // https://linux.die.net/man/3/sscanf
 int32_t wrapper_sscanf(uint8_t* mem, uint32_t str_addr, uint32_t format_addr, struct Varargs* args) {
     assert(0 && "sscanf not implemented");
+}
+
+int wrapper_getrlimit(uint8_t *mem, int resource, uint32_t buf_addr) {
+    MEM_U32(ERRNO_ADDR) = EINVAL;
+    return -1;
+}
+
+int wrapper_setrlimit(uint8_t *mem, int resource, uint32_t buf_addr) {
+    MEM_U32(ERRNO_ADDR) = EINVAL;
+    return -1;
+}
+
+int wrapper_getrusage(uint8_t *mem, int who, uint32_t buf_addr) {
+    MEM_U32(ERRNO_ADDR) = EINVAL;
+    return -1;
+}
+
+int wrapper_BSDopendir(uint8_t *mem, uint32_t dirname_addr) {
+    assert(0 && "BSDopendir not implemented");
+    return 0;
+}
+
+int wrapper_BSDclosedir(uint8_t *mem, int dirp) {
+    assert(0 && "BSDclosedir not implemented");
+    return 0;
+}
+
+int wrapper_BSDreaddir(uint8_t *mem, int dirp) {
+    assert(0 && "BSDreaddir not implemented");
+    return 0;
+}
+
+int wrapper_pcreateve(uint8_t *mem, uint32_t path_addr, uint32_t argv_addr, uint32_t envp_addr) {
+    assert(0 && "pcreateve not implemented");
+    return 0;
+}
+
+uint32_t wrapper_sgidladd(uint8_t *mem, int path, int mode) {
+    assert(0 && "sgidladd not implemented");
+    return 0;
+}
+
+uint32_t wrapper_dlerror(uint8_t* mem) {
+    assert(0 && "dlerror not implemented");
+    return 0;
+}
+
+void wrapper_ipa_add_comma_list(uint8_t* mem) {
+    assert(0 && "ipa_add_comma_list not implemented");
+}
+
+void wrapper_ipa_add_link_flag(uint8_t* mem) {
+    assert(0 && "ipa_add_link_flag not implemented");
+}
+
+void wrapper_ipa_compose_comma_list(uint8_t* mem) {
+    assert(0 && "ipa_compose_comma_list not implemented");
+}
+
+void wrapper_ipa_driver(uint8_t* mem) {
+    assert(0 && "ipa_driver not implemented");
+}
+
+void wrapper_ipa_init_link_line(uint8_t* mem) {
+    assert(0 && "ipa_init_link_line not implemented");
+}
+
+void wrapper_process_whirl32(uint8_t* mem) {
+    assert(0 && "process_whirl32 not implemented");
 }
 
 // C++ functions
