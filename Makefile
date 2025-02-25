@@ -20,7 +20,7 @@ ASAN ?= 0
 ifeq ($(VERSION),7.1)
   IDO_VERSION := IDO71
 # copt currently does not build
-  IDO_TC      := cc acpp as0 as1 cfe ugen ujoin uld umerge uopt usplit upas edgcpfe NCC ld
+  IDO_TC      := cc acpp as0 as1 cfe ugen ujoin uld umerge uopt usplit upas edgcpfe NCC ld strip
   IDO_LIBS    :=
 else ifeq ($(VERSION),5.3)
   IDO_VERSION := IDO53
@@ -134,6 +134,8 @@ RECOMP_FLAGS :=
 $(BUILD_BASE)/5.3/ugen.c: RECOMP_FLAGS := --conservative
 # 7.1 ld uses N32 ABI
 $(BUILD_BASE)/7.1/ld.c: RECOMP_FLAGS := --n32
+# 7.1 strip uses N32 ABI
+$(BUILD_BASE)/7.1/strip.c: RECOMP_FLAGS := --n32
 
 $(RECOMP_ELF): CXXFLAGS  += -I$(RABBITIZER)/include -I$(RABBITIZER)/cplusplus/include
 $(RECOMP_ELF): LDFLAGS   += -L$(RABBITIZER)/build -lrabbitizerpp
@@ -160,6 +162,8 @@ LIBC_IMPL     := libc_impl_$(subst .,,$(VERSION))_o32
 %/7.1/out/edgcpfe: LIBC_IMPL := libc_impl_53_o32
 # ld 7.1 uses N32 ABI
 %/7.1/out/ld: LIBC_IMPL := libc_impl_71_n32
+# strip 7.1 uses N32 ABI
+%/7.1/out/strip: LIBC_IMPL := libc_impl_71_n32
 
 #### Main Targets ###
 
