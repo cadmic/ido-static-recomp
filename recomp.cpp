@@ -1492,6 +1492,7 @@ TYPE insn_to_type(Insn& insn) {
         case rabbitizer::InstrId::UniqueId::cpu_lh:
         case rabbitizer::InstrId::UniqueId::cpu_lhu:
         case rabbitizer::InstrId::UniqueId::cpu_lw:
+        case rabbitizer::InstrId::UniqueId::cpu_lwu:
         case rabbitizer::InstrId::UniqueId::cpu_lwl:
         // case rabbitizer::InstrId::UniqueId::cpu_lwr:
         case rabbitizer::InstrId::UniqueId::cpu_move:
@@ -1567,16 +1568,18 @@ TYPE insn_to_type(Insn& insn) {
         case rabbitizer::InstrId::UniqueId::cpu_tlt:
             return TYPE_S;
 
-        case rabbitizer::InstrId::UniqueId::cpu_div:
-            return TYPE_D_S;
-
         case rabbitizer::InstrId::UniqueId::cpu_div_s:
         case rabbitizer::InstrId::UniqueId::cpu_div_d:
             return TYPE_NOP;
 
+        case rabbitizer::InstrId::UniqueId::cpu_div:
         case rabbitizer::InstrId::UniqueId::cpu_divu:
+        case rabbitizer::InstrId::UniqueId::cpu_ddiv:
+        case rabbitizer::InstrId::UniqueId::cpu_ddivu:
         case rabbitizer::InstrId::UniqueId::cpu_mult:
         case rabbitizer::InstrId::UniqueId::cpu_multu:
+        case rabbitizer::InstrId::UniqueId::cpu_dmult:
+        case rabbitizer::InstrId::UniqueId::cpu_dmultu:
             return TYPE_D_S;
 
         case rabbitizer::InstrId::UniqueId::cpu_neg_s:
@@ -1610,8 +1613,12 @@ uint64_t get_dest_reg_mask(const Insn& insn) {
     switch (insn.instruction.getUniqueId()) {
         case rabbitizer::InstrId::UniqueId::cpu_div:
         case rabbitizer::InstrId::UniqueId::cpu_divu:
+        case rabbitizer::InstrId::UniqueId::cpu_ddiv:
+        case rabbitizer::InstrId::UniqueId::cpu_ddivu:
         case rabbitizer::InstrId::UniqueId::cpu_mult:
         case rabbitizer::InstrId::UniqueId::cpu_multu:
+        case rabbitizer::InstrId::UniqueId::cpu_dmult:
+        case rabbitizer::InstrId::UniqueId::cpu_dmultu:
             return map_reg(GPR_O32_lo) | map_reg(GPR_O32_hi);
 
         default:
@@ -2810,6 +2817,18 @@ void dump_instr(int i) {
             printf("hi = (uint32_t)%s %% (uint32_t)%s;\n", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
             break;
 
+        case rabbitizer::InstrId::UniqueId::cpu_ddiv:
+            printf("lo = (int64_t)%s / (int64_t)%s; ", r((int)insn.instruction.GetO32_rs()),
+                    r((int)insn.instruction.GetO32_rt()));
+            printf("hi = (int64_t)%s %% (int64_t)%s;\n", r((int)insn.instruction.GetO32_rs()),
+                    r((int)insn.instruction.GetO32_rt()));
+            break;
+
+        case rabbitizer::InstrId::UniqueId::cpu_ddivu:
+            printf("lo = (uint64_t)%s / (uint64_t)%s; ", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
+            printf("hi = (uint64_t)%s %% (uint64_t)%s;\n", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
+            break;
+
         case rabbitizer::InstrId::UniqueId::cpu_div_s:
             printf("%s = %s / %s;\n", fr((int)insn.instruction.GetO32_fd()), fr((int)insn.instruction.GetO32_fs()),
                    fr((int)insn.instruction.GetO32_ft()));
@@ -3050,8 +3069,14 @@ void dump_instr(int i) {
 
         case rabbitizer::InstrId::UniqueId::cpu_lw:
             imm = insn.getImmediate();
-            printf("%s = MEM_U32(%s + %d);\n", r((int)insn.instruction.GetO32_rt()),
+            printf("%s = MEM_S32(%s + %d);\n", r((int)insn.instruction.GetO32_rt()),
                    r((int)insn.instruction.GetO32_rs()), imm);
+            break;
+
+        case rabbitizer::InstrId::UniqueId::cpu_lwu:
+            imm = insn.getImmediate();
+            printf("%s = MEM_U32(%s + %d);\n", r((int)insn.instruction.GetO32_rt()),
+                    r((int)insn.instruction.GetO32_rs()), imm);
             break;
 
         case rabbitizer::InstrId::UniqueId::cpu_lwc1:
@@ -3109,11 +3134,19 @@ void dump_instr(int i) {
             break;
 
         case rabbitizer::InstrId::UniqueId::cpu_mfhi:
-            printf("%s = hi;\n", r((int)insn.instruction.GetO32_rd()));
+            if (insn.instruction.GetO32_rd() == rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero) {
+                printf("//%s\n", insn.disassemble().c_str());
+            } else {
+                printf("%s = hi;\n", r((int)insn.instruction.GetO32_rd()));
+            }
             break;
 
         case rabbitizer::InstrId::UniqueId::cpu_mflo:
-            printf("%s = lo;\n", r((int)insn.instruction.GetO32_rd()));
+            if (insn.instruction.GetO32_rd() == rabbitizer::Registers::Cpu::GprO32::GPR_O32_zero) {
+                printf("//%s\n", insn.disassemble().c_str());
+            } else {
+                printf("%s = hi;\n", r((int)insn.instruction.GetO32_rd()));
+            }
             break;
 
         case rabbitizer::InstrId::UniqueId::cpu_move:
@@ -3134,6 +3167,18 @@ void dump_instr(int i) {
             printf("lo = %s * %s; ", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
             printf("hi = (uint64_t)(uint32_t)%s * (uint64_t)(uint32_t)%s >> 32;\n", r((int)insn.instruction.GetO32_rs()),
                    r((int)insn.instruction.GetO32_rt()));
+            break;
+
+        case rabbitizer::InstrId::UniqueId::cpu_dmult:
+            printf("lo = %s * %s; ", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
+            printf("hi = (int64_t)%s * (int64_t)%s >> 32;\n",
+                    r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
+            break;
+
+        case rabbitizer::InstrId::UniqueId::cpu_dmultu:
+            printf("lo = %s * %s; ", r((int)insn.instruction.GetO32_rs()), r((int)insn.instruction.GetO32_rt()));
+            printf("hi = (uint64_t)%s * (uint64_t)%s >> 32;\n", r((int)insn.instruction.GetO32_rs()),
+                    r((int)insn.instruction.GetO32_rt()));
             break;
 
         case rabbitizer::InstrId::UniqueId::cpu_sqrt_s:
