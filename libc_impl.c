@@ -56,11 +56,11 @@
 
 #ifdef IDO53
 // IDO 5.3
+#define LIBC_ADDR 0x0fb50000
+#define LIBC_SIZE 0x3000
 #define IOB_ADDR 0x0fb528e4
 #define ERRNO_ADDR 0x0fb52720
 #define CTYPE_ADDR 0x0fb504f0
-#define LIBC_ADDR 0x0fb50000
-#define LIBC_SIZE 0x3000
 #define OPTERR_ADDR 0x0fb522e0
 #define OPTIND_ADDR 0x0fb522e4
 #define OPTOPT_ADDR 0x0fb522e8
@@ -70,21 +70,21 @@
 #ifdef IDO71
 // IDO 7.1
 #ifdef MIPS_ABI_N32
+#define LIBC_ADDR 0x0fb48000
+#define LIBC_SIZE 0x8000
 #define IOB_ADDR 0x0fb4b0e0
 #define ERRNO_ADDR 0x0fb4bb40
 #define CTYPE_ADDR 0x0fb493e8
-#define LIBC_ADDR 0x0fb49000
-#define OPTERR_ADDR 0x0fb54b30
-#define OPTIND_ADDR 0x0fb54b34
-#define OPTOPT_ADDR 0x0fb59830
-#define OPTARG_ADDR 0x0fb59834
-#define LIBC_SIZE 0x3000
+#define OPTERR_ADDR 0x0fb48cf0
+#define OPTIND_ADDR 0x0fb48cf4
+#define OPTOPT_ADDR 0x0fb4f1c0
+#define OPTARG_ADDR 0x0fb4f1c4
 #else /* MIPS_ABI_O32 */
+#define LIBC_ADDR 0x0fb4c000
+#define LIBC_SIZE 0x3000
 #define IOB_ADDR 0x0fb4ee44
 #define ERRNO_ADDR 0x0fb4ec80
 #define CTYPE_ADDR 0x0fb4cba0
-#define LIBC_ADDR 0x0fb4c000
-#define LIBC_SIZE 0x3000
 #define OPTERR_ADDR 0x0fb436a0
 #define OPTIND_ADDR 0x0fb436a4
 #define OPTOPT_ADDR 0x0fb436a8
@@ -94,11 +94,11 @@
 
 #ifdef IDO72
 // IDO 7.2
+#define LIBC_ADDR 0x0fb46000
+#define LIBC_SIZE 0x4000
 #define IOB_ADDR 0x0fb49454
 #define ERRNO_ADDR 0x0fb49290
 #define CTYPE_ADDR 0x0fb46db0
-#define LIBC_ADDR 0x0fb46000
-#define LIBC_SIZE 0x4000
 // #define OPTERR_ADDR
 // #define OPTIND_ADDR
 // #define OPTOPT_ADDR
